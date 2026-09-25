@@ -1,0 +1,4 @@
+Peridot includes the EFF Long Wordlist (crates/peridot-sync/src/eff_large_wordlist.txt),
+by the Electronic Frontier Foundation, https://www.eff.org/dice, licensed under
+CC BY 3.0 US (https://creativecommons.org/licenses/by/3.0/us/). The four words
+containing a dash were removed.
