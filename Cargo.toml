@@ -18,3 +18,11 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["full"] }
 tracing = "0.1.44"
+
+# Recovery kits use scrypt; unoptimized it takes a minute in tests.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.pbkdf2]
+opt-level = 3

@@ -231,6 +231,10 @@ async fn devices_and_theme_are_shared() {
         serde_json::json!([{"kind": "theme", "name": "catppuccin", "from": "Desk"}])
     );
 
+    // "Not now" hides it.
+    laptop.engine.dismiss(&overview.offers[0]).unwrap();
+    assert!(laptop.engine.overview().await.offers.is_empty());
+
     // The laptop didn't change its theme, so it doesn't override the desk's.
     desk.sync().await;
     assert!(desk.engine.overview().await.offers.is_empty());

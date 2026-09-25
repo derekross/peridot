@@ -4,9 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Peridot daemon: keeps your Omarchy computers matching"
 
 [[bin]]
 name = "peridotd"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }
+futures = "0.3.34"
+nostr-sdk.workspace = true
+notify = "8"
+opal-core.workspace = true
+opal-kit.workspace = true
+peridot-sync = { path = "../peridot-sync" }
+rustix = { version = "1.1.5", features = ["process", "system"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+toml = "1.1.6"
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zeroize = "1.9.0"
+
+[dev-dependencies]
+nostr-sdk = { version = "0.45", features = ["local-relay"] }
+tempfile = "3"

@@ -244,7 +244,7 @@ fn target_of(pattern: &str) -> Target {
         .collect();
     if fixed.len() == parts.len() {
         Target::File(pattern.to_string())
-    } else if parts[fixed.len()..].iter().any(|p| *p == "**") || parts.len() - fixed.len() > 1 {
+    } else if parts[fixed.len()..].contains(&"**") || parts.len() - fixed.len() > 1 {
         Target::Tree(fixed.join("/"))
     } else {
         Target::Dir(fixed.join("/"))

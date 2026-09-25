@@ -274,7 +274,7 @@ impl SyncStore {
             .iter()
             .filter_map(|j| serde_json::from_str(j).ok())
             .collect();
-        out.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
+        out.sort_by_key(|d| std::cmp::Reverse(d.last_seen));
         Ok(out)
     }
 

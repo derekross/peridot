@@ -609,7 +609,56 @@ impl SyncEngine {
         }
     }
 
+    /// "Not now" for an offer: it isn't shown again for that same value.
+    pub fn dismiss(&self, offer: &Offer) -> anyhow::Result<()> {
+        let mut dismissed = self.dismissed();
+        dismissed.insert(offer_key(offer));
+        self.store
+            .db()
+            .set_kv("peridot.dismissed", &serde_json::to_string(&dismissed)?)?;
+        Ok(())
+    }
+
+    /// The theme from another computer was applied here: that's now the
+    /// agreed value, not a change of ours.
+    pub fn theme_applied(&self, name: &str) -> anyhow::Result<()> {
+        self.store.set_state_synced("theme", name)?;
+        Ok(())
+    }
+
+    fn dismissed(&self) -> std::collections::BTreeSet<String> {
+        self.store
+            .db()
+            .get_kv("peridot.dismissed")
+            .ok()
+            .flatten()
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default()
+    }
+
+    /// Folders to watch for changes (relative to home): the manifest's,
+    /// plus where Omarchy keeps the current theme, themes and plugins.
+    pub async fn watch_targets(&self) -> Vec<crate::manifest::Target> {
+        use crate::manifest::Target;
+        let mut t = self.manifest.read().await.targets();
+        t.push(Target::Dir(".local/state/omarchy/current".into()));
+        t.push(Target::Dir(".config/omarchy/themes".into()));
+        t.push(Target::Dir(".config/omarchy/plugins".into()));
+        t
+    }
+
+    pub fn home_path(&self) -> &std::path::Path {
+        self.home.path()
+    }
+
     fn offers(&self, name_of: &dyn Fn(&str) -> String) -> Vec<Offer> {
+        let dismissed = self.dismissed();
+        let mut offers = self.all_offers(name_of);
+        offers.retain(|o| !dismissed.contains(&offer_key(o)));
+        offers
+    }
+
+    fn all_offers(&self, name_of: &dyn Fn(&str) -> String) -> Vec<Offer> {
         let mut offers = Vec::new();
         let here = local_state(self.home.path(), &self.device);
         let local_theme = here.iter().find_map(|s| match s {
@@ -682,6 +731,14 @@ impl SyncEngine {
                 let _ = std::fs::remove_dir_all(d);
             }
         }
+    }
+}
+
+fn offer_key(o: &Offer) -> String {
+    match o {
+        Offer::Theme { name, .. } => format!("theme:{name}"),
+        Offer::InstallTheme { url, .. } => format!("install-theme:{url}"),
+        Offer::InstallPlugin { url, .. } => format!("install-plugin:{url}"),
     }
 }
 
