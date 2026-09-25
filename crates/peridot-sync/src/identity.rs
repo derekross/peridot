@@ -112,7 +112,10 @@ impl Identity {
 
     /// Rebuild the identity from a key and its root event.
     pub fn from_root(keys: Keys, root: &Event) -> anyhow::Result<Self> {
-        anyhow::ensure!(root.pubkey == keys.public_key(), "root event from another key");
+        anyhow::ensure!(
+            root.pubkey == keys.public_key(),
+            "root event from another key"
+        );
         anyhow::ensure!(
             root.tags.identifier().as_deref() == Some(Self::root_name(&keys).as_str()),
             "not a Peridot root event"

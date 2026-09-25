@@ -39,8 +39,10 @@ impl SyncSecret {
         let hk = Hkdf::<Sha256>::new(Some(b"peridot/v1"), &self.0);
         let mut naming = [0u8; 32];
         let mut content = [0u8; 32];
-        hk.expand(b"names", &mut naming).expect("32 bytes is a valid length");
-        hk.expand(b"content", &mut content).expect("32 bytes is a valid length");
+        hk.expand(b"names", &mut naming)
+            .expect("32 bytes is a valid length");
+        hk.expand(b"content", &mut content)
+            .expect("32 bytes is a valid length");
         let conversation = ConversationKey::new(content);
         content.zeroize();
         SyncKeys {

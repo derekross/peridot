@@ -256,7 +256,9 @@ pub fn is_clean_relative(path: &str) -> bool {
     !path.is_empty()
         && !path.starts_with('/')
         && !path.contains('\0')
-        && path.split('/').all(|p| !p.is_empty() && p != "." && p != "..")
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && p != "." && p != "..")
 }
 
 /// Does this look like it holds a secret? Checked before anything is
@@ -288,9 +290,11 @@ pub fn looks_secret(content: &[u8]) -> Option<&'static str> {
         let lower = line.to_ascii_lowercase();
         let assigns = lower.contains('=') || lower.contains(':');
         if assigns
-            && ["api_key", "apikey", "api-key", "password", "passwd", "secret", "token"]
-                .iter()
-                .any(|k| lower.contains(k))
+            && [
+                "api_key", "apikey", "api-key", "password", "passwd", "secret", "token",
+            ]
+            .iter()
+            .any(|k| lower.contains(k))
             && line.split(['=', ':']).nth(1).is_some_and(|v| {
                 let v = v.trim().trim_matches(['"', '\'', ',', ';']);
                 v.len() >= 12 && !v.contains(' ')
@@ -317,11 +321,17 @@ mod tests {
         assert_eq!(m.tier(".config/hypr/bindings.lua"), Some(Tier::Shared));
         assert_eq!(m.tier(".config/hypr/autostart.lua"), Some(Tier::Ask));
         assert_eq!(m.tier(".config/hypr/monitors.lua"), Some(Tier::Local));
-        assert_eq!(m.tier(".config/hypr/input.lua.bak.1790282060"), Some(Tier::Local));
+        assert_eq!(
+            m.tier(".config/hypr/input.lua.bak.1790282060"),
+            Some(Tier::Local)
+        );
         assert_eq!(m.tier(".config/hypr/.luarc.json"), Some(Tier::Local));
         assert_eq!(m.tier(".ssh/id_ed25519"), Some(Tier::Never));
         assert_eq!(m.tier(".config/kitty/secrets.conf"), Some(Tier::Never));
-        assert_eq!(m.tier(".config/omarchy/plugins/x/manifest.json"), Some(Tier::Never));
+        assert_eq!(
+            m.tier(".config/omarchy/plugins/x/manifest.json"),
+            Some(Tier::Never)
+        );
         assert_eq!(m.tier("../etc/passwd"), Some(Tier::Never));
         assert_eq!(m.tier("/etc/passwd"), Some(Tier::Never));
         assert_eq!(m.tier(".config/hypr/./x.lua"), Some(Tier::Never));
@@ -335,7 +345,11 @@ mod tests {
         assert!(!m.syncs(".bashrc"));
         assert!(!m.syncs(".config/hypr/monitors.lua"));
         let m = Manifest::new(Choices {
-            enabled: vec![".bashrc".into(), ".ssh/**".into(), ".config/hypr/monitors.lua".into()],
+            enabled: vec![
+                ".bashrc".into(),
+                ".ssh/**".into(),
+                ".config/hypr/monitors.lua".into(),
+            ],
             excluded: vec![".config/kitty/**".into()],
         });
         assert!(m.syncs(".bashrc"));
@@ -353,8 +367,15 @@ mod tests {
         assert!(targets.contains(&Target::Tree(".config/omarchy/extensions".into())));
         assert!(targets.contains(&Target::Tree(".config/nvim".into())));
         assert!(!targets.contains(&Target::File(".config/hypr/autostart.lua".into())));
-        assert!(targets.iter().all(|t| !matches!(t, Target::Dir(d) | Target::Tree(d) if d.is_empty())));
-        assert_eq!(target_of(".config/btop/btop.conf"), Target::File(".config/btop/btop.conf".into()));
+        assert!(
+            targets
+                .iter()
+                .all(|t| !matches!(t, Target::Dir(d) | Target::Tree(d) if d.is_empty()))
+        );
+        assert_eq!(
+            target_of(".config/btop/btop.conf"),
+            Target::File(".config/btop/btop.conf".into())
+        );
     }
 
     #[test]

@@ -114,14 +114,19 @@ impl Home {
         let dir = self.open_dir(parent, true)?;
         let mode = match rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(st) => match FileType::from_raw_mode(st.st_mode) {
-                FileType::RegularFile => Mode::from_bits_truncate(st.st_mode) & Mode::from_bits_truncate(0o755),
+                FileType::RegularFile => {
+                    Mode::from_bits_truncate(st.st_mode) & Mode::from_bits_truncate(0o755)
+                }
                 FileType::Symlink => return Err(ApplyError::Symlink(rel.into())),
                 _ => return Err(ApplyError::NotAFile(rel.into())),
             },
             Err(Errno::NOENT) => Mode::from_bits_truncate(0o644),
             Err(e) => return Err(io(rel, e)),
         };
-        let tmp = format!(".{name}.peridot-{}", hex::encode(crate::crypto::random_bytes::<6>()));
+        let tmp = format!(
+            ".{name}.peridot-{}",
+            hex::encode(crate::crypto::random_bytes::<6>())
+        );
         let fd = rustix::fs::openat(
             &dir,
             tmp.as_str(),
@@ -251,13 +256,21 @@ mod tests {
         let (dir, home) = home();
         assert_eq!(home.read(".config/hypr/bindings.lua").unwrap(), None);
         home.write(".config/hypr/bindings.lua", b"bind").unwrap();
-        assert_eq!(home.read(".config/hypr/bindings.lua").unwrap().unwrap(), b"bind");
+        assert_eq!(
+            home.read(".config/hypr/bindings.lua").unwrap().unwrap(),
+            b"bind"
+        );
         let meta = std::fs::metadata(dir.path().join(".config/hypr/bindings.lua")).unwrap();
         assert_eq!(meta.permissions().mode() & 0o7777, 0o644);
         home.write(".config/hypr/bindings.lua", b"bind 2").unwrap();
-        assert_eq!(home.read(".config/hypr/bindings.lua").unwrap().unwrap(), b"bind 2");
+        assert_eq!(
+            home.read(".config/hypr/bindings.lua").unwrap().unwrap(),
+            b"bind 2"
+        );
         // No temp files left behind.
-        let left: Vec<_> = std::fs::read_dir(dir.path().join(".config/hypr")).unwrap().collect();
+        let left: Vec<_> = std::fs::read_dir(dir.path().join(".config/hypr"))
+            .unwrap()
+            .collect();
         assert_eq!(left.len(), 1);
         home.remove(".config/hypr/bindings.lua").unwrap();
         assert_eq!(home.read(".config/hypr/bindings.lua").unwrap(), None);
@@ -268,8 +281,14 @@ mod tests {
     fn refuses_paths_that_escape_home() {
         let (_dir, home) = home();
         for bad in ["../x", "/etc/passwd", "a/../../x", "", "a//b", "./a"] {
-            assert!(matches!(home.write(bad, b"x"), Err(ApplyError::BadPath(_))), "{bad}");
-            assert!(matches!(home.read(bad), Err(ApplyError::BadPath(_))), "{bad}");
+            assert!(
+                matches!(home.write(bad, b"x"), Err(ApplyError::BadPath(_))),
+                "{bad}"
+            );
+            assert!(
+                matches!(home.read(bad), Err(ApplyError::BadPath(_))),
+                "{bad}"
+            );
         }
     }
 
@@ -280,16 +299,35 @@ mod tests {
         std::fs::write(outside.path().join("target"), b"outside").unwrap();
         // A linked file (e.g. managed by Stow).
         std::fs::create_dir_all(dir.path().join(".config/kitty")).unwrap();
-        std::os::unix::fs::symlink(outside.path().join("target"), dir.path().join(".config/kitty/kitty.conf")).unwrap();
-        assert!(matches!(home.read(".config/kitty/kitty.conf"), Err(ApplyError::Symlink(_))));
+        std::os::unix::fs::symlink(
+            outside.path().join("target"),
+            dir.path().join(".config/kitty/kitty.conf"),
+        )
+        .unwrap();
+        assert!(matches!(
+            home.read(".config/kitty/kitty.conf"),
+            Err(ApplyError::Symlink(_))
+        ));
         assert!(home.is_linked(".config/kitty/kitty.conf"));
-        assert!(matches!(home.write(".config/kitty/kitty.conf", b"x"), Err(ApplyError::Symlink(_))));
-        assert!(matches!(home.remove(".config/kitty/kitty.conf"), Err(ApplyError::Symlink(_))));
+        assert!(matches!(
+            home.write(".config/kitty/kitty.conf", b"x"),
+            Err(ApplyError::Symlink(_))
+        ));
+        assert!(matches!(
+            home.remove(".config/kitty/kitty.conf"),
+            Err(ApplyError::Symlink(_))
+        ));
         // A linked folder on the way.
         std::os::unix::fs::symlink(outside.path(), dir.path().join(".config/foot")).unwrap();
-        assert!(matches!(home.write(".config/foot/foot.ini", b"x"), Err(ApplyError::Symlink(_))));
+        assert!(matches!(
+            home.write(".config/foot/foot.ini", b"x"),
+            Err(ApplyError::Symlink(_))
+        ));
         assert!(!outside.path().join("foot.ini").exists());
-        assert_eq!(std::fs::read(outside.path().join("target")).unwrap(), b"outside");
+        assert_eq!(
+            std::fs::read(outside.path().join("target")).unwrap(),
+            b"outside"
+        );
     }
 
     #[test]
@@ -299,7 +337,10 @@ mod tests {
         std::fs::write(&p, b"#!/bin/sh").unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o4777)).unwrap();
         home.write("hook", b"#!/bin/sh\necho hi").unwrap();
-        assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777, 0o755);
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
     }
 
     #[test]
@@ -307,9 +348,15 @@ mod tests {
         let (dir, home) = home();
         std::fs::create_dir_all(dir.path().join("afolder")).unwrap();
         assert!(matches!(home.read("afolder"), Err(ApplyError::NotAFile(_))));
-        assert!(matches!(home.write("afolder", b"x"), Err(ApplyError::NotAFile(_))));
+        assert!(matches!(
+            home.write("afolder", b"x"),
+            Err(ApplyError::NotAFile(_))
+        ));
         let big = vec![b'a'; MAX_FILE_SIZE as usize + 1];
-        assert!(matches!(home.write("big", &big), Err(ApplyError::TooBig(_))));
+        assert!(matches!(
+            home.write("big", &big),
+            Err(ApplyError::TooBig(_))
+        ));
         std::fs::write(dir.path().join("big"), &big).unwrap();
         assert!(matches!(home.read("big"), Err(ApplyError::TooBig(_))));
     }

@@ -74,7 +74,10 @@ pub enum StateEntry {
     /// Themes installed from git, by name → clone URL.
     Themes { themes: Vec<Source>, device: String },
     /// Plugins installed from git.
-    Plugins { plugins: Vec<Source>, device: String },
+    Plugins {
+        plugins: Vec<Source>,
+        device: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -203,7 +206,8 @@ pub fn assemble(
         None => {
             let mut all = Vec::with_capacity(entry.size as usize);
             for sha in &entry.chunks {
-                let c = chunk(sha).ok_or_else(|| anyhow::anyhow!("a piece of it hasn't arrived yet"))?;
+                let c = chunk(sha)
+                    .ok_or_else(|| anyhow::anyhow!("a piece of it hasn't arrived yet"))?;
                 let piece = b64.decode(&c.data)?;
                 anyhow::ensure!(sha256_hex(&piece) == *sha, "a piece of it is damaged");
                 all.extend_from_slice(&piece);
@@ -245,7 +249,11 @@ mod tests {
         let mut chunks = HashMap::new();
         let mut entry = None;
         for s in &sealed {
-            assert!(s.content.len() < 45_000, "fits every relay we use: {}", s.content.len());
+            assert!(
+                s.content.len() < 45_000,
+                "fits every relay we use: {}",
+                s.content.len()
+            );
             match open(&keys, &s.d, &s.content).unwrap() {
                 Item::Chunk(c) => {
                     chunks.insert(c.sha256.clone(), c);
@@ -255,7 +263,10 @@ mod tests {
             }
         }
         let entry = entry.unwrap();
-        assert_eq!(assemble(&entry, |sha| chunks.get(sha).cloned()).unwrap(), content);
+        assert_eq!(
+            assemble(&entry, |sha| chunks.get(sha).cloned()).unwrap(),
+            content
+        );
         // A missing piece is reported, not papered over.
         assert!(assemble(&entry, |_| None).is_err());
     }
@@ -264,10 +275,19 @@ mod tests {
     fn rejects_foreign_tampered_or_moved_items() {
         let keys = SyncSecret::generate().keys();
         let other = SyncSecret::generate().keys();
-        let a = pack_file(&keys, "a", b"1", None, "d").unwrap().pop().unwrap();
-        let b = pack_file(&keys, "b", b"2", None, "d").unwrap().pop().unwrap();
+        let a = pack_file(&keys, "a", b"1", None, "d")
+            .unwrap()
+            .pop()
+            .unwrap();
+        let b = pack_file(&keys, "b", b"2", None, "d")
+            .unwrap()
+            .pop()
+            .unwrap();
         assert!(open(&other, &a.d, &a.content).is_none());
-        assert!(open(&keys, &b.d, &a.content).is_none(), "entry for a under b's tag");
+        assert!(
+            open(&keys, &b.d, &a.content).is_none(),
+            "entry for a under b's tag"
+        );
         let mut bad = FileEntry {
             data: Some(base64::engine::general_purpose::STANDARD.encode(b"evil")),
             ..match open(&keys, &a.d, &a.content).unwrap() {
