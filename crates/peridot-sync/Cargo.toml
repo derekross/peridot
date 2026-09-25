@@ -1,0 +1,33 @@
+[package]
+name = "peridot-sync"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Peridot's sync engine: encrypted settings sync, device pairing, recovery kits"
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.23.1"
+getrandom = "0.3.4"
+globset = "0.4"
+hex = "0.4.3"
+hkdf = "0.12.4"
+hmac = "0.12.1"
+nostr-sdk.workspace = true
+notify = "8"
+opal-core.workspace = true
+opal-kit.workspace = true
+rusqlite = "0.40.2"
+rustix = { version = "1.1.5", features = ["fs"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10.9"
+thiserror = "2.0.21"
+tokio.workspace = true
+tracing.workspace = true
+zeroize = { version = "1.9.0", features = ["derive"] }
+
+[dev-dependencies]
+nostr-sdk = { version = "0.45", features = ["local-relay"] }
+tempfile = "3"
