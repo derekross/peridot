@@ -97,6 +97,14 @@ impl App {
         identity: Identity,
         fresh: bool,
     ) -> anyhow::Result<()> {
+        // Sync state belongs to one identity. If the keyring now holds a
+        // different one (reset keyring, rejoined as someone else), start
+        // over rather than trust state that isn't ours.
+        let pubkey = identity.pubkey().to_hex();
+        if self.db.get_kv("peridot.identity")?.as_deref() != Some(pubkey.as_str()) {
+            self.clear_sync_state()?;
+            self.db.set_kv("peridot.identity", &pubkey)?;
+        }
         let cfg = self.config.read().await.clone();
         let store = SyncStore::new(self.db.clone())?;
         // Signs relay logins (NIP-42), which private-data relays require.
@@ -136,14 +144,24 @@ impl App {
             engine.client().shutdown().await;
         }
         Identity::forget(&self.secrets).await?;
+        self.clear_sync_state()?;
+        self.emit_state().await;
+        Ok(())
+    }
+
+    /// Forget everything synced (not the files themselves).
+    fn clear_sync_state(&self) -> anyhow::Result<()> {
+        // The tables exist once a store has been opened.
+        SyncStore::new(self.db.clone())?;
+        Outbox::new(self.db.clone())?;
         self.db.with(|c| {
             c.execute_batch(
                 "DELETE FROM synced; DELETE FROM remote; DELETE FROM chunks;
-                 DELETE FROM devices; DELETE FROM state; DELETE FROM kit_outbox;
-                 DELETE FROM kv WHERE key LIKE 'peridot.%';",
+                 DELETE FROM devices; DELETE FROM state; DELETE FROM history;
+                 DELETE FROM kit_outbox;
+                 DELETE FROM kv WHERE key LIKE 'peridot.%' AND key != 'peridot.device_id';",
             )
         })?;
-        self.emit_state().await;
         Ok(())
     }
 

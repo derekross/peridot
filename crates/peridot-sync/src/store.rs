@@ -20,6 +20,9 @@ pub enum FileStatus {
     Incoming,
     /// Changed both here and elsewhere since they last matched.
     Conflict,
+    /// You undid the version from another computer: this computer keeps
+    /// its own, without pushing it to the others, until either changes.
+    Kept,
 }
 
 /// The newest version of a file from any of your computers.
@@ -93,7 +96,8 @@ impl SyncStore {
     pub fn new(db: Db) -> opal_core::Result<Self> {
         db.migrate(
             "peridot.sync",
-            &["CREATE TABLE synced (
+            &[
+                "CREATE TABLE synced (
                 path TEXT PRIMARY KEY,
                 sha TEXT,
                 at INTEGER NOT NULL
@@ -127,7 +131,12 @@ impl SyncStore {
                 paths TEXT NOT NULL,
                 backup_dir TEXT,
                 undone INTEGER NOT NULL DEFAULT 0
-            );"],
+            );",
+                "CREATE TABLE kept (
+                path TEXT PRIMARY KEY,
+                remote TEXT NOT NULL
+            );",
+            ],
         )?;
         Ok(Self { db })
     }
@@ -336,6 +345,38 @@ impl SyncStore {
             .optional()
         })?;
         Ok(row.and_then(|j| serde_json::from_str(&j).ok()))
+    }
+
+    /// Keep this computer's version of `path` while the other computers'
+    /// version stays `remote` (its hash, or empty for a deletion).
+    pub fn keep(&self, path: &str, remote: &str) -> opal_core::Result<()> {
+        self.db.with(|c| {
+            c.execute(
+                "INSERT INTO kept (path, remote) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET remote = excluded.remote",
+                params![path, remote],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn kept(&self, path: &str) -> Option<String> {
+        self.db
+            .with(|c| {
+                c.query_row("SELECT remote FROM kept WHERE path = ?1", [path], |r| {
+                    r.get(0)
+                })
+                .optional()
+            })
+            .ok()
+            .flatten()
+    }
+
+    pub fn unkeep(&self, path: &str) -> opal_core::Result<()> {
+        self.db.with(|c| {
+            c.execute("DELETE FROM kept WHERE path = ?1", [path])?;
+            Ok(())
+        })
     }
 
     pub fn add_history(

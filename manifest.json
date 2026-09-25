@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "derekross.peridot",
+  "name": "Peridot",
+  "version": "0.1.0",
+  "author": "Derek Ross",
+  "license": "MIT",
+  "description": "Keep your Omarchy computers matching: your look, keyboard shortcuts, terminal, bar and menu follow you. End-to-end encrypted, no account needed; pair a new computer with a code. Needs the peridotd service: run dist/install.sh.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "shell-plugin/PeridotService.qml",
+    "barWidget": "shell-plugin/Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Peridot",
+    "description": "Sync your settings across your Omarchy computers.",
+    "category": "System",
+    "aliases": [
+      "sync",
+      "settings sync",
+      "dotfiles",
+      "backup"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

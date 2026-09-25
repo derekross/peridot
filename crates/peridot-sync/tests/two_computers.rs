@@ -39,6 +39,8 @@ impl Computer {
         })
         .unwrap();
         engine.connect().await;
+        // As the daemon does before anything else.
+        engine.catch_up().await.unwrap();
         Self {
             engine,
             home,
@@ -69,7 +71,7 @@ impl Computer {
     async fn sync(&self) {
         // Relays need a moment to make events queryable.
         tokio::time::sleep(Duration::from_millis(150)).await;
-        self.engine.catch_up().await;
+        self.engine.catch_up().await.unwrap();
     }
 }
 
@@ -126,7 +128,31 @@ async fn edits_flow_between_computers_and_can_be_undone() {
         .unwrap();
     assert_eq!(restored, [BINDINGS]);
     assert_eq!(laptop.read(BINDINGS).unwrap(), b"-- laptop default");
-    assert_eq!(laptop.status(BINDINGS).await, Some(FileStatus::Outgoing));
+    // Kept here only: the desk isn't asked to take it.
+    assert_eq!(laptop.status(BINDINGS).await, Some(FileStatus::Kept));
+    assert!(
+        laptop
+            .engine
+            .publish_changes()
+            .await
+            .unwrap()
+            .published
+            .is_empty()
+    );
+    desk.sync().await;
+    assert_eq!(desk.status(BINDINGS).await, Some(FileStatus::InSync));
+
+    // A new change on the desk is offered again.
+    desk.write(BINDINGS, b"bind = SUPER, Return, exec, kitty");
+    desk.engine.publish_changes().await.unwrap();
+    laptop.sync().await;
+    assert_eq!(laptop.status(BINDINGS).await, Some(FileStatus::Incoming));
+    // And a kept file can still be taken explicitly.
+    laptop.engine.apply(&[BINDINGS.to_string()]).await.unwrap();
+    assert_eq!(
+        laptop.read(BINDINGS).unwrap(),
+        b"bind = SUPER, Return, exec, kitty"
+    );
 }
 
 #[tokio::test]
@@ -238,4 +264,44 @@ async fn devices_and_theme_are_shared() {
     // The laptop didn't change its theme, so it doesn't override the desk's.
     desk.sync().await;
     assert!(desk.engine.overview().await.offers.is_empty());
+}
+
+#[tokio::test]
+async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await;
+    let id = Identity::generate();
+    let desk = Computer::new(&id, &url, "Desk").await;
+    desk.write(BINDINGS, b"the real bindings");
+    desk.engine.publish_changes().await.unwrap();
+
+    // A newly paired laptop whose servers are unreachable.
+    let dead = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let db = Db::open_in_memory().unwrap();
+    let laptop = SyncEngine::new(SyncParams {
+        identity: id.clone(),
+        signer: Arc::new(KeysSigner(id.keys.clone())),
+        store: SyncStore::new(db.clone()).unwrap(),
+        outbox: Outbox::new(db).unwrap(),
+        home: Home::open(home.path()).unwrap(),
+        manifest: Manifest::new(Choices::default()),
+        client: Client::default(),
+        relays: vec![dead],
+        backups_dir: data.path().join("b"),
+        device_name: "Laptop".into(),
+        version: "test".into(),
+    })
+    .unwrap();
+    std::fs::create_dir_all(home.path().join(".config/hypr")).unwrap();
+    std::fs::write(home.path().join(BINDINGS), b"laptop defaults").unwrap();
+    assert!(laptop.catch_up().await.is_err());
+    let report = laptop.publish_changes().await.unwrap();
+    assert!(
+        report.published.is_empty(),
+        "held back until it has caught up"
+    );
+    laptop.announce().await.unwrap();
+    assert_eq!(laptop.store.state("theme").unwrap(), None);
 }

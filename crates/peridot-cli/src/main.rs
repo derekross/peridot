@@ -278,7 +278,7 @@ async fn run() -> Result<()> {
             };
             let r = c.call("history.undo", json!({"id": id})).await?;
             println!(
-                "Put back {} file(s).",
+                "Put back {} file(s) on this computer. Your other computers keep theirs.",
                 r["restored"].as_array().map(|a| a.len()).unwrap_or(0)
             );
         }
@@ -386,6 +386,7 @@ fn print_status(s: &Value) {
             "incoming" => format!("changed on {from}"),
             "conflict" => format!("changed here and on {from}"),
             "outgoing" => "changed here, sending".into(),
+            "kept" => format!("kept this computer's version (undid {from}'s)"),
             _ => continue,
         };
         let warn = if f["runs_commands"] == json!(true) {

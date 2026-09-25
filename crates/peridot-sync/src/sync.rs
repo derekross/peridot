@@ -201,8 +201,17 @@ impl SyncEngine {
     }
 
     /// Fetch what changed since we last looked and take it in. Returns how
-    /// many items were new.
-    pub async fn catch_up(&self) -> usize {
+    /// many items were new, or an error if no server could be reached.
+    pub async fn catch_up(&self) -> anyhow::Result<usize> {
+        let connected = self
+            .client
+            .relays()
+            .await
+            .values()
+            .any(|r| r.status().is_connected());
+        if !connected {
+            anyhow::bail!("can't reach your sync servers");
+        }
         let since = self.store.since().saturating_sub(CATCH_UP_MARGIN);
         let targets: Vec<(RelayUrl, Vec<Filter>)> = self
             .relays
@@ -217,12 +226,35 @@ impl SyncEngine {
             .timeout(FETCH_TIMEOUT)
             .await
         {
-            Ok(events) => events.iter().filter(|e| self.ingest(e)).count(),
-            Err(e) => {
-                tracing::debug!("catching up failed: {e}");
-                0
+            Ok(events) => {
+                let new = events.iter().filter(|e| self.ingest(e)).count();
+                self.mark_caught_up();
+                Ok(new)
             }
+            Err(e) => Err(anyhow::anyhow!("catching up failed: {e}")),
         }
+    }
+
+    /// Whether this computer has heard from the servers at least once with
+    /// this identity. Until then it publishes nothing: a newly paired
+    /// computer must never push its defaults over your real settings just
+    /// because it couldn't see them yet.
+    pub fn caught_up(&self) -> bool {
+        self.store
+            .db()
+            .get_kv("peridot.caught_up")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(self.pubkey().to_hex().as_str())
+    }
+
+    /// For a brand-new identity there's nothing to catch up on.
+    pub fn mark_caught_up(&self) {
+        let _ = self
+            .store
+            .db()
+            .set_kv("peridot.caught_up", &self.pubkey().to_hex());
     }
 
     /// Take in one event from a relay. Returns whether it told us something
@@ -304,17 +336,16 @@ impl SyncEngine {
             };
             let synced = self.store.synced(&path).ok().flatten();
             let remote = self.store.remote(&path).ok().flatten();
-            let status = decide(
-                local.as_deref(),
-                synced.as_deref(),
-                remote.as_ref(),
-                &self.device,
-            );
+            let status =
+                self.status_of(&path, local.as_deref(), synced.as_deref(), remote.as_ref());
             let tier = manifest.tier(&path);
             files.push(FileRow {
-                from: (status == FileStatus::Incoming || status == FileStatus::Conflict)
-                    .then(|| remote.as_ref().map(|r| name_of(&r.entry.device)))
-                    .flatten(),
+                from: matches!(
+                    status,
+                    FileStatus::Incoming | FileStatus::Conflict | FileStatus::Kept
+                )
+                .then(|| remote.as_ref().map(|r| name_of(&r.entry.device)))
+                .flatten(),
                 deleted: remote.as_ref().is_some_and(|r| r.entry.deleted),
                 runs_commands: tier == Some(Tier::Ask),
                 path,
@@ -334,8 +365,11 @@ impl SyncEngine {
     /// Publish everything that changed here (and deletions of files that
     /// synced before), then send what we can.
     pub async fn publish_changes(&self) -> anyhow::Result<PublishReport> {
-        let manifest = self.manifest.read().await;
         let mut report = PublishReport::default();
+        if !self.caught_up() {
+            return Ok(report);
+        }
+        let manifest = self.manifest.read().await;
         let mut paths = scan::syncable_paths(&self.home, &manifest);
         for p in self.store.remote_paths()? {
             if manifest.syncs(&p) && !paths.contains(&p) {
@@ -354,12 +388,8 @@ impl SyncEngine {
             let sha = local.as_deref().map(sha256_hex);
             let synced = self.store.synced(&path)?;
             let remote = self.store.remote(&path)?;
-            if decide(
-                sha.as_deref(),
-                synced.as_deref(),
-                remote.as_ref(),
-                &self.device,
-            ) != FileStatus::Outgoing
+            if self.status_of(&path, sha.as_deref(), synced.as_deref(), remote.as_ref())
+                != FileStatus::Outgoing
             {
                 continue;
             }
@@ -405,7 +435,13 @@ impl SyncEngine {
         };
         self.queue(&[envelope::seal(&self.keys, &Item::Device(device))?], 0)
             .await?;
-        for s in local_state(self.home.path(), &self.device) {
+        // Like files, never before we've seen what's already there.
+        let states = if self.caught_up() {
+            local_state(self.home.path(), &self.device)
+        } else {
+            Vec::new()
+        };
+        for s in states {
             let kind = state_kind(&s);
             let value = state_value(&s);
             let agreed = self.store.state_synced(kind);
@@ -463,7 +499,10 @@ impl SyncEngine {
                     f.status == FileStatus::Incoming
                 } else {
                     paths.contains(&f.path)
-                        && matches!(f.status, FileStatus::Incoming | FileStatus::Conflict)
+                        && matches!(
+                            f.status,
+                            FileStatus::Incoming | FileStatus::Conflict | FileStatus::Kept
+                        )
                 }
             })
             .collect();
@@ -498,6 +537,7 @@ impl SyncEngine {
                     self.store
                         .set_synced(path, Some(&remote.entry.sha256), stamp)?;
                 }
+                self.store.unkeep(path)?;
                 if let Some(f) = &row.from
                     && !from.contains(f)
                 {
@@ -559,15 +599,47 @@ impl SyncEngine {
         let dir = entry.backup_dir.map(PathBuf::from);
         let mut restored = Vec::new();
         for path in &entry.paths {
-            match dir.as_ref().map(|d| d.join(path)).filter(|p| p.exists()) {
-                Some(saved) => self.home.write(path, &std::fs::read(saved)?)?,
+            let content = match dir.as_ref().map(|d| d.join(path)).filter(|p| p.exists()) {
+                Some(saved) => {
+                    let content = std::fs::read(saved)?;
+                    self.home.write(path, &content)?;
+                    Some(content)
+                }
                 // It didn't exist before the apply.
-                None => self.home.remove(path)?,
+                None => {
+                    self.home.remove(path)?;
+                    None
+                }
+            };
+            // Keep this version here without pushing it to your other
+            // computers (they keep theirs), until either side changes it.
+            let sha = content.as_deref().map(sha256_hex);
+            self.store.set_synced(path, sha.as_deref(), now())?;
+            if let Some(remote) = self.store.remote(path)? {
+                self.store.keep(path, remote.sha().unwrap_or(""))?;
             }
             restored.push(path.clone());
         }
         self.store.mark_undone(history_id)?;
         Ok(restored)
+    }
+
+    /// [`decide`], plus versions you chose to keep here after an undo.
+    fn status_of(
+        &self,
+        path: &str,
+        local: Option<&str>,
+        synced: Option<&str>,
+        remote: Option<&crate::store::Remote>,
+    ) -> FileStatus {
+        let status = decide(local, synced, remote, &self.device);
+        if status == FileStatus::Incoming
+            && let Some(remote) = remote
+            && self.store.kept(path).as_deref() == Some(remote.sha().unwrap_or(""))
+        {
+            return FileStatus::Kept;
+        }
+        status
     }
 
     /// Send what's waiting in the outbox.

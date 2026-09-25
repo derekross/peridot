@@ -45,7 +45,7 @@ impl Daemon {
             .arg(dir.path().join("peridot.db"))
             .arg("--home")
             .arg(&home)
-            .env("PERIDOT_LOG", "warn")
+            .env("PERIDOT_LOG", "error")
             .spawn()
             .unwrap();
         for _ in 0..100 {
@@ -221,6 +221,10 @@ async fn pair_then_sync_a_change() {
         desk.read(".config/hypr/bindings.lua").unwrap(),
         "bind = SUPER, Return, exec, ghostty"
     );
+    // Kept on the desk only; nothing is waiting there any more.
+    let s = desk.status().await;
+    assert_eq!(s["files"][0]["status"], json!("kept"));
+    assert_eq!(s["counts"]["incoming"], json!(0));
 
     // Later, with nothing else going on: only the file watcher can notice.
     tokio::time::sleep(Duration::from_secs(2)).await;
@@ -233,6 +237,30 @@ async fn pair_then_sync_a_change() {
         })
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn subscribers_get_the_state_and_live_events() {
+    let relay = MockRelay::run().await.unwrap();
+    let url = relay.url().await.to_string();
+    let d = Daemon::start(&url, "Desk").await;
+    let mut c = Client::open(&d.socket).await;
+    let first = c.call("subscribe", json!(null)).await.unwrap();
+    assert_eq!(first["set_up"], json!(false));
+    // A change made elsewhere is pushed to subscribers.
+    d.call("setup.start_fresh", json!(null)).await;
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        tokio::time::timeout(Duration::from_secs(10), c.r.read_line(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&buf).unwrap();
+        if v["event"] == json!("state") && v["data"]["set_up"] == json!(true) {
+            break;
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

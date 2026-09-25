@@ -169,6 +169,7 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
         task,
         confirm: None,
     });
+    app.emit_state().await;
     Ok(out)
 }
 
@@ -254,6 +255,7 @@ pub async fn start_existing(app: &Arc<App>, code: &str) -> anyhow::Result<PairVi
         task,
         confirm: Some(confirm_tx),
     });
+    app.emit_state().await;
     Ok(out)
 }
 

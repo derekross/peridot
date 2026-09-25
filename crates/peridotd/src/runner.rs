@@ -38,11 +38,26 @@ pub fn spawn(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> JoinHandle<
 async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Result<()> {
     engine.connect().await;
     if fresh {
+        engine.mark_caught_up();
         engine.publish_root().await?;
     }
     // Always catch up before saying anything, so we don't publish over
-    // newer changes from elsewhere.
-    engine.catch_up().await;
+    // newer changes from elsewhere. Until it works, nothing is published.
+    loop {
+        match engine.catch_up().await {
+            Ok(_) => {
+                app.set_error(None).await;
+                break;
+            }
+            Err(e) => {
+                app.set_error(Some(format!("Waiting for your sync servers: {e}")))
+                    .await;
+                app.emit_state().await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                engine.connect().await;
+            }
+        }
+    }
     engine.announce().await?;
     if !app.config.read().await.paused {
         publish(&app, &engine).await;
@@ -104,7 +119,7 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
                 // An apply may have created folders we couldn't watch before.
                 watcher = watch(&engine, fs_tx.clone()).await;
                 let paused = app.config.read().await.paused;
-                if engine.catch_up().await > 0 {
+                if engine.catch_up().await.is_ok_and(|n| n > 0) {
                     after_incoming(&app, &engine, &mut waiting).await;
                 }
                 if !paused {
@@ -119,7 +134,7 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
                 }
             }
             _ = catch_up.tick() => {
-                if engine.catch_up().await > 0 {
+                if engine.catch_up().await.is_ok_and(|n| n > 0) {
                     after_incoming(&app, &engine, &mut waiting).await;
                 }
                 // Top-level files (.XCompose, .bashrc) aren't watched.

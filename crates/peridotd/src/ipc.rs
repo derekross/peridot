@@ -20,7 +20,8 @@ impl opal_kit::ipc::Service for App {
     }
 
     fn snapshot(self: Arc<Self>) -> BoxFuture<'static, Value> {
-        Box::pin(async move { self.snapshot().await })
+        // The app's own snapshot, not this trait method (same name).
+        Box::pin(async move { App::snapshot(&self).await })
     }
 
     fn events(&self) -> broadcast::Receiver<IpcEvent> {
