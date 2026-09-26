@@ -200,7 +200,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     &data,
                     Duration::from_secs(u64::from(days) * 86400),
                 )
-                .await?;
+                .await
+                .map_err(share_err)?;
             app.emit_state().await;
             Ok(json!(share))
         }
@@ -230,7 +231,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                     p.text.as_bytes(),
                     Duration::from_secs(u64::from(days) * 86400),
                 )
-                .await?;
+                .await
+                .map_err(share_err)?;
             app.emit_state().await;
             Ok(json!(share))
         }
@@ -469,6 +471,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         other => bail!("unknown method: {other}"),
+    }
+}
+
+/// The signer's "come back later" messages are worded for syncing.
+fn share_err(e: anyhow::Error) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("Unlock Opal") {
+        anyhow::anyhow!("Unlock Opal first: it signs the upload")
+    } else if msg.contains("Opal isn't running") {
+        anyhow::anyhow!("Start Opal first: it signs the upload")
+    } else {
+        e
     }
 }
 
