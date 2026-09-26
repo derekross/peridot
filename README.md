@@ -13,6 +13,8 @@
 - **Your theme, themes and plugins.** Switch themes on one computer and the others offer to switch too. Themes and plugins installed from git on one computer are offered for install on the others.
 - **Recovery kit.** A page to print or save, plus six words to write down. If you lose every computer, they bring everything back.
 - **Undo.** Put back what a computer had before an apply. It stays on that computer only; your others keep theirs.
+- **Private links.** Share a file, the clipboard or your last screenshot as a link: `peridot share`, the Links tab, or Omarchy's menu → Share → Private link. The file is encrypted on your computer; the link carries the key after the `#`, which browsers never send to a server; the viewer at myperidot.app decrypts it in the browser. Links expire (7 days by default) and can be removed any time.
+- **Your identity, your way.** Start with a new key, bring one you already have, or, if [Opal](https://github.com/derekross/opal) is installed, use your Opal identity: Peridot never sees the key, Opal signs for it and logs every use.
 
 ## What syncs
 
@@ -28,6 +30,7 @@ Off until you turn them on, because they can run commands: apps that start at lo
 - **Several independent servers** store the encrypted blobs, so none of them going away loses anything, and you can add your own.
 - **Pairing can't be hijacked by someone who saw the code:** both screens show a number derived from the code and each computer's one-time key. A go-between would make them differ, and nothing is shared until you confirm they match.
 - **Applying is careful.** Paths are checked against what Peridot syncs, then opened by the kernel beneath your home folder with symlinks refused (`openat2`), written atomically, and never made executable. A computer can't send a file outside the sync list, even one that's otherwise valid.
+- **Private links** use AES-256-GCM with a one-time key. The encrypted blob (name and type included) is stored on a [Blossom](https://github.com/hzrd149/blossom) server under its hash; the server sees neither. The viewer checks the hash before decrypting, and lives under a strict content security policy. Anyone with the link can open the file until it expires or you remove it, so treat links like the file itself.
 - **Your key** is kept in the login keyring. On Omarchy that keyring opens with your session, so Peridot is as safe as your login and your disk encryption. That's the same as your browser's saved passwords. Peridot never shows or asks for it; the recovery kit carries it encrypted with your six words.
 - **A hardened service**: no core dumps, a seccomp filter, and a read-only system. It writes only in your home folder. Installing a theme or plugin you accepted runs Omarchy's own installer, outside the service.
 
@@ -81,6 +84,11 @@ peridot keep-mine <path>     # resolve a conflict with this computer's version
 peridot undo / history
 peridot recovery             # make a recovery kit
 peridot restore              # restore from one on a new computer
+peridot share <file>          # private link, copied to the clipboard
+peridot share --clipboard / --screenshot / --pick
+peridot shares / unshare <id>
+peridot relays / relays add wss://… / relays remove …
+peridot start --opal / --import / --fresh
 peridot pause / resume / sync / devices / leave
 ```
 
@@ -102,6 +110,7 @@ Because your identity is a standard Nostr key, you can later use it in other Nos
 crates/peridot-sync  the engine: what syncs, encryption, safe file access, pairing, recovery
 crates/peridotd      the service: runner (file watcher, live sync), control socket API
 crates/peridot-cli   the peridot command
+site                 myperidot.app: the share viewer (site/s) and landing page
 shell-plugin         Omarchy shell plugin (bar icon, panel)
 dist                 systemd unit, install and uninstall scripts
 ```
