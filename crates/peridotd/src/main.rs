@@ -94,7 +94,20 @@ async fn main() -> Result<()> {
         home,
         data_dir,
     });
-    if let Err(e) = app.resume().await {
+    // Say so plainly if the sandbox breaks file access, instead of every
+    // file quietly showing as unreadable.
+    let check = peridot_sync::apply::Home::open(&app.home)
+        .map_err(|e| format!("can't open your home folder: {e}"))
+        .and_then(|h| h.self_check());
+    let sandbox_ok = match check {
+        Ok(()) => true,
+        Err(msg) => {
+            tracing::error!("{msg}");
+            app.set_error(Some(msg)).await;
+            false
+        }
+    };
+    if sandbox_ok && let Err(e) = app.resume().await {
         tracing::warn!("couldn't start syncing: {e:#}");
         app.set_error(Some(e.to_string())).await;
     }

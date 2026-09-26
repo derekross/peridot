@@ -61,6 +61,27 @@ impl Home {
         &self.path
     }
 
+    /// Whether safe opens work here at all. A sandbox that blocks `openat2`
+    /// (systemd's RestrictSUIDSGID= does, since it can't inspect the mode
+    /// inside the call's struct) would otherwise make every file look
+    /// unreadable.
+    pub fn self_check(&self) -> std::result::Result<(), String> {
+        match rustix::fs::openat2(
+            &self.dir,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            RESOLVE,
+        ) {
+            Ok(_) => Ok(()),
+            Err(Errno::NOSYS) => Err("this computer's Peridot service can't open files safely: \
+                 openat2 is blocked (a sandbox option such as RestrictSUIDSGID= in \
+                 peridot.service). Reinstall Peridot to get the current service file."
+                .into()),
+            Err(e) => Err(format!("can't read your home folder: {e}")),
+        }
+    }
+
     /// The file's contents, or None if it doesn't exist.
     pub fn read(&self, rel: &str) -> Result<Option<Vec<u8>>> {
         check(rel)?;

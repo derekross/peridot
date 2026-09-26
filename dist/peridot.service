@@ -25,7 +25,10 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
+# Not RestrictSUIDSGID: systemd can't inspect openat2's mode (it lives in a
+# struct), so that option blocks openat2 entirely, and Peridot relies on it
+# to open files safely beneath your home. Peridot strips setuid/setgid bits
+# from everything it writes instead.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
