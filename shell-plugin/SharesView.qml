@@ -78,6 +78,25 @@ Column {
     text: "Also in the Omarchy menu: Share → Private link. The link is copied to your clipboard."
   }
 
+  // Expired links Opal hasn't let us remove yet (it asks about each removal).
+  Row {
+    spacing: Style.space(8)
+    visible: !!root.svc && !!root.svc.opal && (root.svc.opal.shares_waiting || 0) > 0
+    Text {
+      textFormat: Text.PlainText
+      anchors.verticalCenter: parent.verticalCenter
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      text: (root.svc && root.svc.opal ? root.svc.opal.shares_waiting : 0) + " expired link(s) will be removed once you approve it in Opal"
+    }
+    Button {
+      text: "Remove now"
+      foreground: root.foreground
+      onClicked: root.svc.run("share.sweep", null)
+    }
+  }
+
   PanelSectionHeader {
     visible: root.shares.length > 0
     text: "YOUR LINKS"

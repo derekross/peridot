@@ -54,6 +54,7 @@ Panel {
     tooltipText: {
       if (!root.daemonUp) return "Peridot isn't running"
       if (!root.svc.setUp) return "Peridot: keep your computers matching"
+      if (root.svc.opal && root.svc.opal.needs_pairing) return "Peridot: pair with Opal to keep syncing"
       if (root.attention > 0) return root.attention + " waiting from your other computers"
       if (root.svc.paused) return "Peridot: paused"
       return "Peridot: everything matches"

@@ -219,7 +219,7 @@ Column {
     font.pixelSize: Style.font.bodySmall
     visible: !root.kit
     text: root.viaOpal
-      ? "Opal holds your key, so your Opal backup (the ncryptsec you can copy in Opal's Profiles) is your recovery kit. On a new computer, restore it in Opal, then choose \"Use your Opal identity\" here."
+      ? "Opal holds your key, so your Opal backup (the ncryptsec you can copy in Opal's Profiles) is your recovery kit. On a new computer, restore it in Opal, then choose \"Use your Opal identity\" here. Peridot is listed under Apps in Opal, where you can see what it signed, change what it may do, or revoke it."
       : "If you ever lose every computer, a recovery kit brings your settings back: a page to save or print, and six words to write down."
   }
   Button {

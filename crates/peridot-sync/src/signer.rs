@@ -11,6 +11,11 @@ pub trait IdentitySigner: EventSigner {
     fn pubkey(&self) -> PublicKey;
     fn nip44_self_encrypt(&self, plaintext: String) -> BoxFuture<'_, Result<String, SignError>>;
     fn nip44_self_decrypt(&self, payload: String) -> BoxFuture<'_, Result<String, SignError>>;
+    /// How long the sync engine waits for one signature. A signer that may
+    /// ask the user (Opal, before its rules are in place) needs longer.
+    fn sign_timeout(&self) -> std::time::Duration {
+        opal_kit::signer::SIGN_TIMEOUT
+    }
 }
 
 /// Signs with a key this computer holds.

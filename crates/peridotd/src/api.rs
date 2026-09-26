@@ -82,10 +82,36 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             .ok_or_else(|| anyhow::anyhow!("Opal has no such account"))?;
             let pubkey = PublicKey::from_hex(&account.pubkey)?;
+            // Pair first (you're here to answer), unless the pairing from
+            // before is still good for this account.
+            let paired = app.opal.has_token()
+                && app
+                    .opal
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.pubkey == account.pubkey);
+            if !paired {
+                app.pair_opal(Some(pubkey))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", pair_error(&e)))?;
+            }
             adopt(app, pubkey, None, Some(account.label.clone())).await?;
             Ok(json!({"ok": true}))
         }
         "opal.accounts" => Ok(json!(app.opal.accounts().await)),
+        "opal.pair" => {
+            // Pair (again) with Opal: its prompt appears in the bar.
+            let pubkey = app
+                .engine
+                .read()
+                .await
+                .as_ref()
+                .map(|engine| engine.identity().pubkey());
+            app.pair_opal(pubkey)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", pair_error(&e)))?;
+            Ok(json!({"ok": true}))
+        }
         "setup.leave" => {
             // This computer only; your others keep syncing.
             app.leave().await?;
@@ -95,6 +121,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         // ── Sync ───────────────────────────────────────────────────────
         "sync.now" => {
             app.engine().await?;
+            // You asked: worth asking Opal again even after a "no".
+            app.opal.clear_hold();
             app.nudge.notify_one();
             Ok(json!({"ok": true}))
         }
@@ -237,6 +265,14 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!(share))
         }
         "share.list" => Ok(json!(app.sharer().await?.store.list()?)),
+        "share.sweep" => {
+            // Remove expired links now, even if Opal said no earlier.
+            let sharer = app.sharer().await?;
+            sharer.clear_hold();
+            let removed = sharer.sweep().await;
+            app.emit_state().await;
+            Ok(json!({"removed": removed}))
+        }
         "share.revoke" => {
             #[derive(Deserialize)]
             struct P {
@@ -481,8 +517,32 @@ fn share_err(e: anyhow::Error) -> anyhow::Error {
         anyhow::anyhow!("Unlock Opal first: it signs the upload")
     } else if msg.contains("Opal isn't running") {
         anyhow::anyhow!("Start Opal first: it signs the upload")
+    } else if msg.contains("Pair Peridot with Opal") {
+        anyhow::anyhow!(
+            "Pair Peridot with Opal again first (Peridot's panel, or `peridot opal pair`)"
+        )
+    } else if msg.contains("didn't allow") {
+        anyhow::anyhow!(
+            "Opal didn't allow the upload: you said no, or a rule under Apps in Opal blocks it"
+        )
     } else {
         e
+    }
+}
+
+/// Why pairing didn't happen, for someone who just asked for it.
+fn pair_error(e: &anyhow::Error) -> String {
+    let msg = e.to_string();
+    if msg.contains("declined") {
+        "You declined in Opal; nothing was set up".into()
+    } else if msg.contains("timed out") || msg.contains("didn't answer") {
+        "Opal's prompt wasn't answered; try again".into()
+    } else if msg.contains("already waiting") {
+        "Peridot is already waiting for your answer in Opal".into()
+    } else if msg.contains("isn't running") {
+        "Opal isn't running".into()
+    } else {
+        format!("Opal didn't pair with Peridot: {msg}")
     }
 }
 
@@ -588,7 +648,11 @@ async fn fetch_identity(
 ) -> Result<Option<Identity>> {
     let signer: Arc<dyn IdentitySigner> = match &keys {
         Some(k) => Arc::new(LocalSigner(k.clone())),
-        None => Arc::new(crate::opal::OpalSigner::new(app.opal.clone(), pubkey)),
+        None => Arc::new(crate::opal::OpalSigner::new(
+            app.opal.clone(),
+            pubkey,
+            crate::opal::Mode::Interactive,
+        )),
     };
     let relays = opal_kit::relays::parse_urls(&app.config.read().await.relays);
     let client = Client::default();

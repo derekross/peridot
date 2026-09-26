@@ -46,6 +46,11 @@ enum Cmd {
         #[arg(long)]
         fresh: bool,
     },
+    /// Your pairing with Opal (when Opal holds your identity).
+    Opal {
+        #[command(subcommand)]
+        cmd: OpalCmd,
+    },
     /// Pair a new computer. Run on the new one; then run
     /// `peridot pair <code>` on a computer you already use.
     Pair {
@@ -115,6 +120,12 @@ enum Cmd {
     Restore,
     /// Stop syncing on this computer (your others keep going).
     Leave,
+}
+
+#[derive(Subcommand)]
+enum OpalCmd {
+    /// Pair (again) with Opal: approve Peridot in Opal's bar.
+    Pair,
 }
 
 #[derive(Subcommand)]
@@ -277,6 +288,7 @@ async fn run() -> Result<()> {
                         format!("Opal has no account matching \"{wanted}\"")
                     })
                 })?;
+                println!("{OPAL_WILL_ASK}");
                 c.call("setup.use_opal", json!({"pubkey": account["pubkey"]}))
                     .await?;
                 println!(
@@ -288,6 +300,7 @@ async fn run() -> Result<()> {
                 if yes(&format!(
                     "Use your Opal identity \"{label}\"? (No makes a new one)"
                 ))? {
+                    println!("{OPAL_WILL_ASK}");
                     c.call("setup.use_opal", json!({"pubkey": account["pubkey"]}))
                         .await?;
                     println!("Peridot is set up with your Opal identity ({label}).");
@@ -391,6 +404,33 @@ async fn run() -> Result<()> {
             }
 
             let mut links = Vec::new();
+            // With Opal holding the key, an upload may wait on its prompt.
+            let via_opal = c
+                .call("status", json!(null))
+                .await
+                .is_ok_and(|s| s["identity"]["mode"] == json!("opal"));
+            let hint = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if !via_opal {
+                    return;
+                }
+                if notify {
+                    let _ = std::process::Command::new("omarchy-notification-send")
+                        .args([
+                            "--app-name",
+                            "Peridot",
+                            "-g",
+                            "󰓦",
+                            "-t",
+                            "6000",
+                            "Approve Peridot in Opal",
+                            "Opal (in your bar) is asking whether Peridot may sign the upload.",
+                        ])
+                        .status();
+                } else {
+                    println!("Approve Peridot in Opal (in your bar) to finish the upload…");
+                }
+            });
             let result: Result<()> = async {
                 if let Some(t) = text {
                     let s = c
@@ -416,6 +456,7 @@ async fn run() -> Result<()> {
                 Ok(())
             }
             .await;
+            hint.abort();
             if let Err(e) = result {
                 if notify {
                     let _ = std::process::Command::new("omarchy-notification-send")
@@ -464,6 +505,11 @@ async fn run() -> Result<()> {
                     "Copied to the clipboard. Anyone with the link can open it until it expires; `peridot unshare` removes it sooner."
                 );
             }
+        }
+        Cmd::Opal { cmd: OpalCmd::Pair } => {
+            println!("{OPAL_WILL_ASK}");
+            c.call("opal.pair", json!(null)).await?;
+            println!("Paired. Opal lists Peridot under Apps.");
         }
         Cmd::Shares => {
             let s = c.call("share.list", json!(null)).await?;
@@ -858,7 +904,19 @@ fn print_status(s: &Value) {
             n("skipped")
         );
     }
+    let opal = &s["opal"];
+    if opal["needs_pairing"] == json!(true) {
+        println!("Pair with Opal to keep syncing: `peridot opal pair`");
+    } else if opal["waiting_approval"] == json!(true) {
+        println!("Waiting for your approval in Opal (in your bar).");
+    }
+    if let Some(n) = opal["shares_waiting"].as_u64().filter(|n| *n > 0) {
+        println!("{n} expired link(s) will be removed once Opal allows it: `peridot shares`.");
+    }
     if let Some(e) = s["error"].as_str() {
         println!("Problem: {e}");
     }
 }
+
+const OPAL_WILL_ASK: &str =
+    "Opal will ask you to approve Peridot: look for its prompt in your bar.";

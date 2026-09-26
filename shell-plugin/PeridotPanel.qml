@@ -115,6 +115,7 @@ Item {
                 var id = s.status.identity || {}
                 var who = id.name || U.shortKey(id.npub || "")
                 if (id.mode === "opal") who += " via Opal"
+                if (s.opal && s.opal.waiting_approval) who += " · waiting for Opal"
                 if (s.paused) return (s.status.device_name || "This computer") + " · " + who + " · paused"
                 var parts = [s.status.device_name || "This computer", who]
                 var waiting = s.attention
@@ -159,6 +160,48 @@ Item {
             bordered: true
             foreground: root.foreground
             onClicked: if (root.svc) root.svc.startDaemon()
+          }
+        }
+
+        // ── Opal needs a word ─────────────────────────────────────
+        Column {
+          width: parent.width
+          visible: root.up && root.svc.setUp && !!root.svc.opal
+            && (root.svc.opal.needs_pairing || root.svc.opal.waiting_approval || !!root.svc.opal.held_until)
+          spacing: Style.space(8)
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: root.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            text: {
+              var o = root.svc.opal
+              if (o.waiting_approval) return "Approve Peridot in Opal's bar…"
+              if (o.needs_pairing) return "Peridot signs as you through Opal, and Opal needs your OK again before it keeps syncing."
+              return "Opal said no earlier, so Peridot is waiting before it asks again. Sync now to ask sooner, or change what Peridot may do under Apps in Opal."
+            }
+          }
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            visible: !!root.svc.opal.pair_error
+            wrapMode: Text.Wrap
+            color: root.urgent
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            text: root.svc.opal.pair_error || ""
+          }
+          Button {
+            visible: root.svc.opal.needs_pairing || root.svc.opal.waiting_approval
+            text: "Pair with Opal"
+            iconText: "󰇈"
+            bordered: true
+            iconSpinning: root.svc.opal.waiting_approval
+            enabled: !root.svc.opal.waiting_approval
+            foreground: root.foreground
+            onClicked: root.svc.run("opal.pair", null, function() { root.showToast("Paired with Opal", false) })
           }
         }
 

@@ -14,7 +14,7 @@
 - **Recovery kit.** A page to print or save, plus six words to write down. If you lose every computer, they bring everything back.
 - **Undo.** Put back what a computer had before an apply. It stays on that computer only; your others keep theirs.
 - **Private links.** Share a file, the clipboard or your last screenshot as a link: `peridot share`, the Links tab, or Omarchy's menu → Share → Private link. The file is encrypted on your computer; the link carries the key after the `#`, which browsers never send to a server; the viewer at myperidot.app decrypts it in the browser. Links expire (7 days by default) and can be removed any time.
-- **Your identity, your way.** Start with a new key, bring one you already have, or, if [Opal](https://github.com/derekross/opal) is installed, use your Opal identity: Peridot never sees the key, Opal signs for it and logs every use.
+- **Your identity, your way.** Start with a new key, bring one you already have, or, if [Opal](https://github.com/derekross/opal) is installed, use your Opal identity: you approve Peridot once in Opal, Peridot never sees the key, and Opal signs for it under its own rules and logs every use.
 
 ## What syncs
 
@@ -89,6 +89,7 @@ peridot share --clipboard / --screenshot / --pick
 peridot shares / unshare <id>
 peridot relays / relays add wss://… / relays remove …
 peridot start --opal / --import / --fresh
+peridot opal pair             # pair with Opal again (after revoking it there)
 peridot pause / resume / sync / devices / leave
 ```
 
@@ -103,6 +104,8 @@ Peridot is a small service (`peridotd`) plus an Omarchy shell plugin. Under the 
 - The recovery kit is your key encrypted with NIP-49 (scrypt) under your six words. The sync secret is stored on the servers, encrypted to your key.
 
 Because your identity is a standard Nostr key, you can later use it in other Nostr apps. [Opal](https://github.com/derekross/opal), a Nostr suite for Omarchy, can hold it for that. Peridot is built on Opal's shared crates.
+
+**With Opal.** Peridot pairs with Opal like any app: Opal asks you once, showing which program is asking (`~/.local/bin/peridotd`) and what it wants to sign, and from then on lists Peridot under Apps with everything it signed. Syncing your settings (kind 30078) can be allowed for good; tick it when pairing so the sync doesn't ask each time. Relay logins and private-link uploads are sensitive in Opal's book, so it asks about them unless you allow them for an hour or give Peridot full trust. If Opal says no, Peridot waits an hour before asking again (sync now to ask sooner). Revoke Peridot in Opal at any time; Peridot then asks to pair again, from its panel or `peridot opal pair`. Opal only accepts the pairing from the program that made it, so a rebuilt `peridotd` at another path pairs again too.
 
 ## Layout
 

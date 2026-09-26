@@ -29,10 +29,13 @@ Item {
   readonly property var history: status.history || []
   readonly property var pairing: status.pairing || null
   readonly property bool paused: status.paused === true
+  // The pairing with Opal, when Opal holds the identity (see peridotd `opal`).
+  readonly property var opal: status.opal || null
   // Things that want you: changes to apply, conflicts, offers, a pairing
-  // waiting for your answer.
+  // waiting for your answer, Opal needing to pair again.
   readonly property int attention: (counts.incoming || 0) + (counts.conflicts || 0) + (counts.offers || 0)
     + (pairing && pairing.stage === "confirm" ? 1 : 0)
+    + (opal && opal.needs_pairing ? 1 : 0)
 
   signal message(string text, bool isError)
   signal openRequested()

@@ -11,6 +11,15 @@ pub fn changes_waiting(count: usize, from: &str) {
     send(&title, "Review and apply them in Peridot.");
 }
 
+/// Opal no longer accepts Peridot's pairing and the automatic retry
+/// didn't go through.
+pub fn opal_pairing_needed() {
+    send(
+        "Peridot needs to pair with Opal again",
+        "Open Peridot and choose \"Pair with Opal\" to keep syncing.",
+    );
+}
+
 fn send(title: &str, body: &str) {
     let mut cmd;
     if which("omarchy-notification-send") {

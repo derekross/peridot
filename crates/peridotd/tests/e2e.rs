@@ -357,30 +357,59 @@ async fn recovery_kit_restores_on_a_new_computer() {
     );
 }
 
-/// A stand-in for the Opal daemon: one account, answers the calls Peridot
-/// makes (`status`, `app.sign`, `app.nip44`), and can be "locked".
+/// How the fake Opal answers prompts.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Allow,
+    /// Everything is refused, pairing included.
+    Deny,
+    /// Only what Opal treats as sensitive is refused (Blossom, relay auth,
+    /// decrypt); syncing goes through.
+    DenySensitive,
+}
+
+/// A stand-in for the Opal daemon with the local-app protocol: one account,
+/// pairing that hands out a token, `app.sign`/`app.nip44`/`app.status` that
+/// need it, a lock, and a choice of answers.
 struct FakeOpal {
     socket: PathBuf,
     keys: nostr_sdk::prelude::Keys,
     locked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    answer: std::sync::Arc<std::sync::Mutex<Answer>>,
+    token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    connects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    signs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
 impl FakeOpal {
     async fn start(label: &str) -> Self {
         use nostr_sdk::prelude::*;
+        use std::sync::atomic::Ordering;
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("opal.sock");
         let keys = Keys::generate();
         let locked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let answer = std::sync::Arc::new(std::sync::Mutex::new(Answer::Allow));
+        let token = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
+        let connects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let signs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-        let (k, l, label) = (keys.clone(), locked.clone(), label.to_string());
+        let shared = (
+            keys.clone(),
+            locked.clone(),
+            label.to_string(),
+            answer.clone(),
+            token.clone(),
+            connects.clone(),
+            signs.clone(),
+        );
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
-                let (k, l, label) = (k.clone(), l.clone(), label.clone());
+                let (k, l, label, answer, token, connects, signs) = shared.clone();
                 tokio::spawn(async move {
                     let (r, mut w) = stream.into_split();
                     let mut lines = BufReader::new(r).lines();
@@ -388,7 +417,14 @@ impl FakeOpal {
                         let req: Value = serde_json::from_str(&line).unwrap();
                         let id = req["id"].clone();
                         let p = &req["params"];
-                        let locked = l.load(std::sync::atomic::Ordering::SeqCst);
+                        let locked = l.load(Ordering::SeqCst);
+                        let answer = *answer.lock().unwrap();
+                        let paired = p["token"]
+                            .as_str()
+                            .is_some_and(|t| token.lock().unwrap().as_deref() == Some(t));
+                        let sensitive_no = |sensitive: bool| {
+                            answer == Answer::Deny || (answer == Answer::DenySensitive && sensitive)
+                        };
                         let result: Result<Value, String> = match req["method"]
                             .as_str()
                             .unwrap_or("")
@@ -398,34 +434,66 @@ impl FakeOpal {
                                 "accounts": [{"pubkey": k.public_key().to_hex(), "label": label,
                                               "npub": k.public_key().to_bech32().unwrap(), "current": true}],
                             })),
-                            "app.sign" if locked => Err("Opal is locked".into()),
+                            "app.connect" => {
+                                assert_eq!(p["app"], json!("peridot"));
+                                assert_eq!(p["name"], json!("Peridot"));
+                                assert_eq!(p["kinds"], json!([30078, 22242, 24242]));
+                                assert_eq!(p["nip44"], json!(true));
+                                if let Some(pk) = p["pubkey"].as_str() {
+                                    assert_eq!(pk, k.public_key().to_hex());
+                                }
+                                if answer == Answer::Deny {
+                                    Err("declined".into())
+                                } else {
+                                    // Pairing works while locked (it needs no key).
+                                    let t = Keys::generate().secret_key().to_secret_hex();
+                                    *token.lock().unwrap() = Some(t.clone());
+                                    connects.fetch_add(1, Ordering::SeqCst);
+                                    Ok(json!({"token": t, "pubkey": k.public_key().to_hex()}))
+                                }
+                            }
+                            "app.status" if !paired => Err("not paired".into()),
+                            "app.status" => Ok(json!({
+                                "pubkey": k.public_key().to_hex(), "name": "Peridot", "policy": "basic"
+                            })),
+                            "app.sign" | "app.nip44" if !paired => Err("not paired".into()),
+                            "app.sign" | "app.nip44" if locked => Err("Opal is locked".into()),
                             "app.sign" => {
                                 let unsigned: UnsignedEvent =
                                     serde_json::from_value(p["event"].clone()).unwrap();
-                                assert_eq!(p["app"], json!("peridot"));
-                                assert!(
-                                    [30078u16, 5, 21078, 22242, 24242]
-                                        .contains(&unsigned.kind.as_u16()),
-                                    "kind {}",
-                                    unsigned.kind
-                                );
-                                Ok(json!(k.sign_event(unsigned).unwrap()))
+                                let kind = unsigned.kind.as_u16();
+                                if ![30078u16, 22242, 24242].contains(&kind) {
+                                    Err(format!(
+                                        "Peridot didn't declare kind {kind} when it paired"
+                                    ))
+                                } else if sensitive_no(kind != 30078) {
+                                    Err("user rejected".into())
+                                } else {
+                                    signs.fetch_add(1, Ordering::SeqCst);
+                                    Ok(json!(k.sign_event(unsigned).unwrap()))
+                                }
                             }
-                            "app.nip44" if locked => Err("Opal is locked".into()),
                             "app.nip44" => {
                                 let content = p["content"].as_str().unwrap();
-                                let out = match p["op"].as_str().unwrap() {
-                                    "encrypt" => nip44::encrypt(
-                                        k.secret_key(),
-                                        &k.public_key(),
-                                        content,
-                                        nip44::Version::V2,
-                                    )
-                                    .unwrap(),
-                                    _ => nip44::decrypt(k.secret_key(), &k.public_key(), content)
+                                let op = p["op"].as_str().unwrap();
+                                if sensitive_no(op == "decrypt") {
+                                    Err("user rejected".into())
+                                } else {
+                                    let out = match op {
+                                        "encrypt" => nip44::encrypt(
+                                            k.secret_key(),
+                                            &k.public_key(),
+                                            content,
+                                            nip44::Version::V2,
+                                        )
                                         .unwrap(),
-                                };
-                                Ok(json!({"content": out}))
+                                        _ => {
+                                            nip44::decrypt(k.secret_key(), &k.public_key(), content)
+                                                .unwrap()
+                                        }
+                                    };
+                                    Ok(json!({"content": out}))
+                                }
                             }
                             m => Err(format!("unknown method: {m}")),
                         };
@@ -447,6 +515,10 @@ impl FakeOpal {
             socket,
             keys,
             locked,
+            answer,
+            token,
+            connects,
+            signs,
             _dir: dir,
         }
     }
@@ -454,6 +526,23 @@ impl FakeOpal {
     fn set_locked(&self, locked: bool) {
         self.locked
             .store(locked, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn set_answer(&self, a: Answer) {
+        *self.answer.lock().unwrap() = a;
+    }
+
+    /// Revoke Peridot, as the Apps view would.
+    fn revoke(&self) {
+        *self.token.lock().unwrap() = None;
+    }
+
+    fn connects(&self) -> usize {
+        self.connects.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn signs(&self) -> usize {
+        self.signs.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -472,7 +561,8 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
         "bind = SUPER, Return, exec, ghostty",
     );
     // A key with nothing on the servers yet can be set up while Opal is
-    // locked: the first publishes simply wait for the unlock.
+    // locked: pairing needs no key, and the first publishes simply wait
+    // for the unlock.
     opal.set_locked(true);
     desk.call("setup.use_opal", json!({})).await;
     let s = until(&desk, 20, "desk waiting for unlock", |s| {
@@ -483,6 +573,9 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
     .await;
     assert_eq!(s["set_up"], json!(true));
     assert_eq!(s["counts"]["in_sync"], json!(0));
+    assert_eq!(opal.connects(), 1, "paired once during setup");
+    assert_eq!(s["opal"]["paired"], json!(true), "{s}");
+    assert_eq!(s["opal"]["needs_pairing"], json!(false));
     opal.set_locked(false);
     desk.call("sync.now", json!(null)).await;
     let s = until(&desk, 20, "desk to publish via Opal", |s| {
@@ -532,6 +625,7 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
     .await;
     desk.call("pair.confirm", json!({"matches": true})).await;
     until(&laptop, 20, "laptop set up", |s| s["set_up"] == json!(true)).await;
+    assert_eq!(opal.connects(), 2, "the laptop paired with Opal too");
     until(&laptop, 20, "incoming", |s| {
         s["counts"]["incoming"] == json!(1)
     })
@@ -581,6 +675,9 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
         s["counts"]["incoming"] == json!(1)
     })
     .await;
+    // The locked attempt paired (pairing needs no key); the second attempt
+    // found that pairing still good and didn't ask again.
+    assert_eq!(opal.connects(), 3);
 
     // No recovery kit in Opal mode: Opal's backup is the kit.
     let mut c = Client::open(&laptop.socket).await;
@@ -815,4 +912,153 @@ async fn private_links_upload_open_and_revoke() {
     assert!(blossom.blobs.lock().unwrap().get(&link.sha256).is_none());
     let s = d.status().await;
     assert_eq!(s["shares"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_opal_pairing_is_retried_once_then_asks_you() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
+    desk.call("setup.use_opal", json!({})).await;
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    until(&desk, 20, "first sync", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    assert_eq!(opal.connects(), 1);
+
+    // Revoked in Opal's Apps view: the next signature fails, Peridot pairs
+    // again by itself (a prompt in Opal's bar), and the change goes out.
+    opal.revoke();
+    desk.write(".config/kitty/kitty.conf", "font_size 14");
+    let s = until(&desk, 30, "re-paired and published", |s| {
+        s["counts"]["outgoing"] == json!(0)
+            && s["counts"]["in_sync"] == json!(1)
+            && s["error"].is_null()
+    })
+    .await;
+    assert_eq!(opal.connects(), 2, "{s}");
+    assert_eq!(s["opal"]["paired"], json!(true));
+
+    // Revoked again, and this time the prompt is declined: one automatic
+    // try, then it's up to you.
+    opal.set_answer(Answer::Deny);
+    opal.revoke();
+    desk.write(".config/kitty/kitty.conf", "font_size 15");
+    let s = until(&desk, 30, "needs pairing", |s| {
+        s["opal"]["needs_pairing"] == json!(true)
+            && s["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("Pair Peridot with Opal"))
+    })
+    .await;
+    assert_eq!(opal.connects(), 2, "{s}");
+    assert!(
+        s["opal"]["pair_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("declined")),
+        "{s}"
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(opal.connects(), 2, "no retry loop");
+
+    opal.set_answer(Answer::Allow);
+    desk.call("opal.pair", json!(null)).await;
+    let s = until(&desk, 30, "published after pairing", |s| {
+        s["counts"]["outgoing"] == json!(0) && s["error"].is_null()
+    })
+    .await;
+    assert_eq!(opal.connects(), 3);
+    assert_eq!(s["opal"]["needs_pairing"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_opal_signature_keeps_the_change_and_stops_asking() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
+    desk.call("setup.use_opal", json!({})).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+
+    opal.set_answer(Answer::Deny);
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    // The refusal itself, or (after a retry) the hold it started.
+    let s = until(&desk, 20, "held after a no", |s| {
+        s["counts"]["outgoing"] == json!(1)
+            && s["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("didn't allow") || e.contains("ask again"))
+    })
+    .await;
+    assert!(s["opal"]["held_until"].is_u64(), "{s}");
+    let asked = opal.signs();
+    // Another change while held: no new prompt in Opal.
+    desk.write(".config/kitty/kitty.conf", "font_size 14");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(opal.signs(), asked);
+
+    // "Sync now" asks again; with a yes the change goes out.
+    opal.set_answer(Answer::Allow);
+    desk.call("sync.now", json!(null)).await;
+    let s = until(&desk, 20, "published", |s| {
+        s["counts"]["outgoing"] == json!(0)
+            && s["counts"]["in_sync"] == json!(1)
+            && s["error"].is_null()
+    })
+    .await;
+    assert!(s["opal"]["held_until"].is_null(), "{s}");
+    assert_eq!(
+        desk.read(".config/kitty/kitty.conf").unwrap(),
+        "font_size 14"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_links_go_through_opal() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let blossom = FakeBlossom::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "relays = [\"{url}\"]\ndevice_name = \"Desk\"\n[share]\nservers = [\"{}\"]\nviewer = \"https://myperidot.app/s\"\n",
+            blossom.base
+        ),
+    )
+    .unwrap();
+    let d = Daemon::start_in(dir, config, Some(&opal.socket)).await;
+    d.call("setup.use_opal", json!({})).await;
+    until(&d, 20, "set up", |s| s["set_up"] == json!(true)).await;
+
+    let signs = opal.signs();
+    let share = d
+        .call("share.text", json!({"text": "hello from Opal"}))
+        .await;
+    assert!(
+        share["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("https://myperidot.app/s#")
+    );
+    assert!(opal.signs() > signs, "the Blossom auth was signed by Opal");
+
+    // Opal refuses the (sensitive) upload authorization.
+    opal.set_answer(Answer::DenySensitive);
+    let mut c = Client::open(&d.socket).await;
+    let err = c
+        .call("share.text", json!({"text": "again"}))
+        .await
+        .unwrap_err();
+    assert!(err.contains("Opal didn't allow the upload"), "{err}");
+    // Syncing is unaffected by a refused upload.
+    d.write(".config/kitty/kitty.conf", "font_size 13");
+    until(&d, 20, "sync still works", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
 }

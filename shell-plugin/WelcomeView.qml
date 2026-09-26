@@ -70,7 +70,17 @@ Column {
       color: root.dim
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
-      text: "Your key stays in Opal; Peridot asks it to sign. Syncing out pauses while Opal is locked."
+      text: "Your key stays in Opal. Opal will ask you to approve Peridot; tick \"Application data\" there so syncing doesn't ask every time. Relay logins and share uploads may still ask. Syncing out pauses while Opal is locked."
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      visible: root.busy && !!root.svc && !!root.svc.opal && root.svc.opal.waiting_approval
+      wrapMode: Text.Wrap
+      color: root.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "Approve Peridot in Opal's bar (top of the screen)…"
     }
     ButtonGroup {
       width: parent.width

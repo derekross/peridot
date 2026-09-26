@@ -144,6 +144,17 @@ Column {
   Text {
     textFormat: Text.PlainText
     width: parent.width
+    visible: root.p.stage === "approve"
+    wrapMode: Text.Wrap
+    color: root.foreground
+    font.family: Style.font.family
+    font.pixelSize: Style.font.body
+    text: "Your identity is held by Opal. Approve Peridot in Opal's bar to finish."
+  }
+
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
     visible: ["done", "expired", "cancelled", "failed"].indexOf(root.p.stage) !== -1
     wrapMode: Text.Wrap
     color: root.p.stage === "done" ? root.foreground : root.urgent

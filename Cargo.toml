@@ -26,3 +26,10 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.pbkdf2]
 opt-level = 3
+
+# TEMPORARY until Opal 93483dd (local apps pairing) is pushed: build against
+# the local checkout. Then set both revs above to 93483dd, remove this
+# section and run `cargo update -p opal-core -p opal-kit`.
+[patch."https://github.com/derekross/opal"]
+opal-core = { path = "../opal/crates/opal-core" }
+opal-kit = { path = "../opal/crates/opal-kit" }

@@ -14,6 +14,8 @@ use peridot_sync::apply::Home;
 use peridot_sync::identity::Identity;
 use peridot_sync::manifest::Manifest;
 use peridot_sync::signer::{IdentitySigner, LocalSigner, SignerAuth};
+
+use crate::opal::{Mode, OpalSigner, Paired};
 use peridot_sync::store::{FileStatus, SyncStore};
 use peridot_sync::sync::{SyncEngine, SyncParams};
 use serde_json::{Value, json};
@@ -55,7 +57,7 @@ pub struct App {
 impl App {
     pub fn new(o: Options) -> Arc<Self> {
         let (events, _) = broadcast::channel(256);
-        Arc::new(Self {
+        let app = Arc::new(Self {
             config: RwLock::new(o.config),
             config_path: o.config_path,
             db: o.db,
@@ -71,12 +73,50 @@ impl App {
             nudge: Notify::new(),
             last_sync: AtomicU64::new(0),
             last_error: RwLock::new(None),
-        })
+        });
+        tokio::spawn(watch_opal(Arc::downgrade(&app)));
+        app
+    }
+
+    /// Pair with Opal (a prompt appears in its bar) and keep the token.
+    /// `pubkey` says which account, when known.
+    pub async fn pair_opal(self: &Arc<Self>, pubkey: Option<PublicKey>) -> anyhow::Result<Paired> {
+        let result = self.opal.connect(pubkey.as_ref()).await;
+        if let Ok(p) = &result {
+            if pubkey.is_some_and(|pk| pk != p.pubkey) {
+                self.opal.set_token(None);
+                anyhow::bail!("Opal paired Peridot with a different account; pair again");
+            }
+            crate::opal::save_token(&self.secrets, &p.token).await?;
+            self.set_error(None).await;
+            self.nudge.notify_one();
+        }
+        self.emit_state().await;
+        result
+    }
+
+    /// Set up in Opal mode: the identity Opal signs for.
+    async fn opal_identity(&self) -> Option<PublicKey> {
+        let engine = self.engine.read().await.clone()?;
+        let identity = engine.identity();
+        identity.via_opal_mode().then(|| identity.pubkey())
     }
 
     /// Start syncing if this computer is already set up.
     pub async fn resume(self: &Arc<Self>) -> anyhow::Result<()> {
         if let Some(identity) = Identity::load(&self.secrets).await? {
+            if identity.via_opal_mode() {
+                // A token from before; Opal may have revoked it meanwhile
+                // (or not be up yet, which the first request sorts out).
+                let token = crate::opal::load_token(&self.secrets).await?;
+                self.opal.set_token(token);
+                if self.opal.has_token()
+                    && let Err(e) = self.opal.status().await
+                    && e.to_string().contains("Pair Peridot")
+                {
+                    tracing::info!("Opal no longer knows Peridot's pairing");
+                }
+            }
             self.start_engine(identity, false).await?;
         }
         Ok(())
@@ -122,9 +162,20 @@ impl App {
         let store = SyncStore::new(self.db.clone())?;
         let signer: Arc<dyn IdentitySigner> = match &identity.keys {
             Some(keys) => Arc::new(LocalSigner(keys.clone())),
-            None => Arc::new(crate::opal::OpalSigner::new(
+            None => Arc::new(OpalSigner::new(
                 self.opal.clone(),
                 identity.pubkey(),
+                Mode::Background,
+            )),
+        };
+        // Share links are something you ask for, so they may wait on an
+        // Opal prompt; the sync loop must never.
+        let share_signer: Arc<dyn IdentitySigner> = match &identity.keys {
+            Some(_) => signer.clone(),
+            None => Arc::new(OpalSigner::new(
+                self.opal.clone(),
+                identity.pubkey(),
+                Mode::Interactive,
             )),
         };
         // Signs relay logins (NIP-42), which private-data relays require.
@@ -151,7 +202,7 @@ impl App {
         // Share links sign with the same identity.
         let sharer = Arc::new(crate::share::Sharer::new(
             crate::share::ShareStore::new(self.db.clone())?,
-            engine.signer(),
+            share_signer,
             cfg.share.servers.clone(),
             cfg.share.viewer.clone(),
         )?);
@@ -174,6 +225,9 @@ impl App {
         }
         self.sharer.write().await.take();
         Identity::forget(&self.secrets).await?;
+        // Opal keeps its side of the pairing until you revoke it there.
+        crate::opal::forget_token(&self.secrets).await?;
+        self.opal.set_token(None);
         self.clear_sync_state()?;
         self.emit_state().await;
         Ok(())
@@ -239,11 +293,18 @@ impl App {
             "pairing": pairing,
             "error": *self.last_error.read().await,
         });
+        let opal = self.opal.view();
         let Some(engine) = self.engine.read().await.clone() else {
             let mut v = base;
             // The welcome screen offers Opal's accounts when there are any.
             v["opal_accounts"] = json!(self.opal.accounts().await);
             v["set_up"] = json!(false);
+            // Setting up with Opal: "approve Peridot in Opal's bar".
+            v["opal"] = if opal.waiting_approval {
+                json!(opal)
+            } else {
+                Value::Null
+            };
             return v;
         };
         let overview = engine.overview().await;
@@ -258,6 +319,14 @@ impl App {
             "npub": identity.pubkey().to_bech32().ok(),
             "name": self.db.get_kv("peridot.identity_name").ok().flatten(),
         });
+        v["opal"] = if identity.via_opal_mode() {
+            let mut o = json!(opal);
+            o["shares_waiting"] =
+                json!(self.sharer.read().await.as_ref().map_or(0, |s| s.waiting()));
+            o
+        } else {
+            Value::Null
+        };
         v["counts"] = json!({
             "in_sync": overview.count(FileStatus::InSync),
             "outgoing": overview.count(FileStatus::Outgoing),
@@ -299,5 +368,25 @@ impl App {
         v["last_sync"] = json!(self.last_sync.load(Ordering::Relaxed));
         v["choices"] = json!(cfg.sync);
         v
+    }
+}
+
+/// Follows the pairing: re-emits state when it changes, and when Opal
+/// stops accepting the token, tries to pair again once (you chose Opal, and
+/// its prompt is the designed way to say yes). If that doesn't go through,
+/// the panel and `peridot opal pair` take over; no unattended retry loop.
+async fn watch_opal(app: std::sync::Weak<App>) {
+    loop {
+        let Some(app) = app.upgrade() else { break };
+        app.opal.changed().notified().await;
+        if let Some(pubkey) = app.opal_identity().await
+            && app.opal.take_auto_pair()
+        {
+            if app.pair_opal(Some(pubkey)).await.is_err() {
+                crate::notify::opal_pairing_needed();
+            }
+            continue;
+        }
+        app.emit_state().await;
     }
 }

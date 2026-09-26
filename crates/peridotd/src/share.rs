@@ -3,13 +3,14 @@
 //! can be listed, revoked, and removed from the server when they expire.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use base64::Engine;
 use nostr_sdk::prelude::*;
 use opal_core::db::Db;
 use peridot_sync::share::{self, Link, Sealed};
-use peridot_sync::signer::IdentitySigner;
+use peridot_sync::signer::{IdentitySigner, SignError};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
@@ -133,7 +134,13 @@ pub struct Sharer {
     /// The viewer page links point at.
     pub viewer: String,
     http: reqwest::Client,
+    /// After the signer said no to a removal (Opal asks about Blossom
+    /// authorizations), the sweeper waits until then before asking again.
+    retry_after: std::sync::atomic::AtomicU64,
 }
+
+/// How long the sweeper leaves you alone after a "no".
+const SWEEP_HOLD: Duration = Duration::from_secs(3600);
 
 impl Sharer {
     pub fn new(
@@ -153,7 +160,26 @@ impl Sharer {
             servers,
             viewer,
             http,
+            retry_after: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    fn held(&self, now: u64) -> bool {
+        self.retry_after.load(Ordering::SeqCst) > now
+    }
+
+    /// Expired links still on their servers because the signer said no.
+    pub fn waiting(&self) -> usize {
+        let now = Timestamp::now().as_secs();
+        if !self.held(now) {
+            return 0;
+        }
+        self.store.expired(now).map(|v| v.len()).unwrap_or(0)
+    }
+
+    /// You asked: try the removals again now.
+    pub fn clear_hold(&self) {
+        self.retry_after.store(0, Ordering::SeqCst);
     }
 
     /// Encrypt, upload to the first server that takes it, remember it.
@@ -217,15 +243,26 @@ impl Sharer {
         Ok(())
     }
 
-    /// Remove blobs whose time is up. Returns how many were removed.
+    /// Remove blobs whose time is up. Returns how many were removed. One
+    /// refused signature stops the round and holds the sweeper for an hour:
+    /// each removal would otherwise be its own prompt in Opal.
     pub async fn sweep(&self) -> usize {
         let now = Timestamp::now().as_secs();
+        if self.held(now) {
+            return 0;
+        }
         let mut n = 0;
         for s in self.store.expired(now).unwrap_or_default() {
             match self.delete(&server_base(&s.server), &s.sha256).await {
                 Ok(()) => {
                     let _ = self.store.mark_revoked(s.id);
                     n += 1;
+                }
+                Err(e) if e.downcast_ref::<SignError>().is_some() => {
+                    tracing::info!("expired share {} stays until the signer allows: {e}", s.id);
+                    self.retry_after
+                        .store(now + SWEEP_HOLD.as_secs(), Ordering::SeqCst);
+                    break;
                 }
                 Err(e) => tracing::debug!("couldn't remove expired share {}: {e}", s.id),
             }
@@ -317,4 +354,72 @@ pub fn spawn_sweeper(sharer: Arc<Sharer>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::future::BoxFuture;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A signer that always says "not now", counting the asks.
+    struct SaysNo(AtomicUsize);
+
+    impl peridot_sync::signer::EventSigner for SaysNo {
+        fn sign(&self, _: UnsignedEvent) -> BoxFuture<'_, Result<Event, SignError>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err(SignError::Unavailable("Opal didn't allow it".into())) })
+        }
+    }
+
+    impl IdentitySigner for SaysNo {
+        fn pubkey(&self) -> PublicKey {
+            Keys::generate().public_key()
+        }
+        fn nip44_self_encrypt(&self, _: String) -> BoxFuture<'_, Result<String, SignError>> {
+            Box::pin(async { Err(SignError::Failed("no".into())) })
+        }
+        fn nip44_self_decrypt(&self, _: String) -> BoxFuture<'_, Result<String, SignError>> {
+            Box::pin(async { Err(SignError::Failed("no".into())) })
+        }
+    }
+
+    #[tokio::test]
+    async fn sweep_backs_off_when_the_signer_says_no() {
+        let store = ShareStore::new(Db::open_in_memory().unwrap()).unwrap();
+        let signer = Arc::new(SaysNo(AtomicUsize::new(0)));
+        let sharer = Sharer::new(
+            store,
+            signer.clone(),
+            vec!["http://127.0.0.1:9".into()],
+            "https://example.test/s".into(),
+        )
+        .unwrap();
+        let now = Timestamp::now().as_secs();
+        for i in 0..2 {
+            sharer
+                .store
+                .add(&Share {
+                    id: 0,
+                    sha256: format!("{i:0>64}"),
+                    server: "127.0.0.1:9".into(),
+                    name: "x".into(),
+                    size: 1,
+                    created: now - 100,
+                    expires: now - 10,
+                    url: String::new(),
+                    revoked: false,
+                })
+                .unwrap();
+        }
+        assert_eq!(sharer.waiting(), 0, "nothing is held yet");
+        assert_eq!(sharer.sweep().await, 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1, "one ask, then stop");
+        assert_eq!(sharer.waiting(), 2);
+        assert_eq!(sharer.sweep().await, 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 1, "held: no ask");
+        sharer.clear_hold();
+        assert_eq!(sharer.sweep().await, 0);
+        assert_eq!(signer.0.load(Ordering::SeqCst), 2, "asked again on request");
+    }
 }

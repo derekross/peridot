@@ -19,7 +19,8 @@ use crate::app::App;
 pub struct PairView {
     /// "new" on the computer joining, "existing" on the one sharing.
     pub role: &'static str,
-    /// waiting | confirm | sending | done | expired | cancelled | failed
+    /// waiting | confirm | approve (the new computer pairs with Opal) |
+    /// sending | done | expired | cancelled | failed
     pub stage: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
@@ -134,12 +135,18 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
                         Ok(JoinerStep::Paired { identity, reply }) => {
                             let _ = send(&client, &relays, &reply).await;
                             let result = async {
-                                if identity.via_opal_mode()
-                                    && !app.opal.has_account(&identity.pubkey()).await
-                                {
-                                    anyhow::bail!(
-                                        "your other computer's identity is held by Opal. Set up Opal with the same key on this computer first, then pair again"
-                                    );
+                                if identity.via_opal_mode() {
+                                    if !app.opal.has_account(&identity.pubkey()).await {
+                                        anyhow::bail!(
+                                            "your other computer's identity is held by Opal. Set up Opal with the same key on this computer first, then pair again"
+                                        );
+                                    }
+                                    // Opal here must let Peridot sign too.
+                                    set(&view, |v| v.stage = "approve");
+                                    app.emit_state().await;
+                                    app.pair_opal(Some(identity.pubkey()))
+                                        .await
+                                        .map_err(|e| anyhow::anyhow!("Opal didn't pair with Peridot: {e}"))?;
                                 }
                                 identity.save(&app.secrets).await?;
                                 app.start_engine(*identity, false).await

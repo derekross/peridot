@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use nostr_sdk::prelude::*;
 use opal_kit::relays::Outbox;
-use opal_kit::signer::{SIGN_TIMEOUT, sign_within};
+use opal_kit::signer::sign_within;
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -661,7 +661,8 @@ impl SyncEngine {
                 .tag(Tag::identifier(s.d.clone()))
                 .custom_created_at(Timestamp::from(self.next_created_at(after)))
                 .finalize_unsigned(self.pubkey());
-            let ev = sign_within(self.signer.as_ref(), unsigned, SIGN_TIMEOUT).await?;
+            let ev =
+                sign_within(self.signer.as_ref(), unsigned, self.signer.sign_timeout()).await?;
             self.ingest(&ev);
             self.outbox.push(&ev)?;
         }
