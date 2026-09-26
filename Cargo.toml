@@ -10,8 +10,8 @@ repository = "https://github.com/derekross/peridot"
 
 [workspace.dependencies]
 # Shared building blocks from Opal, pinned to a commit.
-opal-core = { git = "https://github.com/derekross/opal", rev = "46dbf67" }
-opal-kit = { git = "https://github.com/derekross/opal", rev = "46dbf67" }
+opal-core = { git = "https://github.com/derekross/opal", rev = "93483dd" }
+opal-kit = { git = "https://github.com/derekross/opal", rev = "93483dd" }
 nostr-sdk = "0.45"
 anyhow = "1.0.104"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -26,10 +26,3 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.pbkdf2]
 opt-level = 3
-
-# TEMPORARY until Opal 93483dd (local apps pairing) is pushed: build against
-# the local checkout. Then set both revs above to 93483dd, remove this
-# section and run `cargo update -p opal-core -p opal-kit`.
-[patch."https://github.com/derekross/opal"]
-opal-core = { path = "../opal/crates/opal-core" }
-opal-kit = { path = "../opal/crates/opal-kit" }
