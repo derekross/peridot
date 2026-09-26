@@ -26,6 +26,21 @@ PLUGIN_PATH="$PLUGINDIR/$PLUGIN_ID"
 VERSION="$(jq -r .version manifest.json)"
 GITHUB_REPO="derekross/peridot"
 
+MARKER=".installed-by-peridot"
+UNIT="$UNITDIR/peridot.service"
+
+die() { echo "$*" >&2; exit 1; }
+
+# Peridot only replaces what it installed itself. Anything else at these
+# paths (another program's `peridot` command, your own peridot.service, a
+# plugin checkout) is left alone and the install stops.
+our_binary() { [[ ! -e $1 ]] || grep -qa "$2" "$1"; }
+our_unit() { [[ ! -e $UNIT ]] || grep -q "https://github.com/derekross/peridot" "$UNIT"; }
+our_plugin_copy() {
+  local dir=$1
+  [[ -d $dir && ! -L $dir && -f $dir/$MARKER ]]
+}
+
 # Installed with `omarchy plugin add`, this checkout *is* the plugin. Build
 # outside it: the shell reloads plugins whenever files change in there.
 FROM_PLUGIN_CHECKOUT=0
@@ -49,7 +64,7 @@ download_release() {
   name="peridot-v$VERSION-$arch-linux"
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
   dir="${XDG_CACHE_HOME:-$HOME/.cache}/peridot/release"
-  rm -rf "$dir" && mkdir -p "$dir"
+  rm -rf "${dir:?}" && mkdir -p "$dir"
   echo "Downloading Peridot v$VERSION ($arch)"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/$name.tar.gz" "$base/$name.tar.gz"
   curl -fsSL --proto '=https' --tlsv1.2 -o "$dir/SHA256SUMS" "$base/SHA256SUMS"
@@ -77,30 +92,51 @@ case $MODE in
   --prebuilt) download_release ;;
 esac
 
+# Check everything before changing anything.
+our_binary "$BINDIR/peridotd" "Peridot daemon" \
+  || die "$BINDIR/peridotd exists and isn't Peridot's. Move it aside, then run this again."
+our_binary "$BINDIR/peridot" "can't reach Peridot at" \
+  || die "$BINDIR/peridot exists and isn't Peridot's. Move it aside, then run this again."
+our_unit || die "$UNIT exists and isn't Peridot's. Move it aside, then run this again."
+INSTALL_PLUGIN=1
+if (( FROM_PLUGIN_CHECKOUT )); then
+  INSTALL_PLUGIN=0
+elif [[ -e $PLUGIN_PATH || -L $PLUGIN_PATH ]] && ! our_plugin_copy "$PLUGIN_PATH"; then
+  INSTALL_PLUGIN=0
+  echo "Note: $PLUGIN_PATH exists and wasn't installed by this script"
+  echo "  (e.g. added with 'omarchy plugin add'); leaving it as it is."
+fi
+
 echo "Installing binaries to $BINDIR"
 install -Dm755 "$BIN_SRC/peridotd" "$BINDIR/peridotd"
 install -Dm755 "$BIN_SRC/peridot" "$BINDIR/peridot"
 
 echo "Installing the systemd user service"
-install -Dm644 dist/peridot.service "$UNITDIR/peridot.service"
+install -Dm644 dist/peridot.service "$UNIT"
 systemctl --user daemon-reload
 systemctl --user enable peridot.service >/dev/null
 systemctl --user restart peridot.service
 
 if (( FROM_PLUGIN_CHECKOUT )); then
   echo "Shell plugin: installed by 'omarchy plugin add' ($PLUGIN_ID)"
-else
+elif (( INSTALL_PLUGIN )); then
   echo "Installing the Omarchy shell plugin ($PLUGIN_ID)"
   mkdir -p "$PLUGINDIR"
   # Copied, not linked: the shell's file watcher doesn't follow symlinks.
-  rm -rf "$PLUGIN_PATH.new"
-  cp -r shell-plugin "$PLUGIN_PATH.new"
+  # Built next to the destination, then swapped in.
+  staging="$(mktemp -d "$PLUGINDIR/.$PLUGIN_ID.XXXXXX")"
+  cp -r shell-plugin/. "$staging/"
   # The repo's single manifest points into shell-plugin/; here the files sit
   # at the top of the plugin folder.
   jq '.entryPoints |= with_entries(.value |= ltrimstr("shell-plugin/"))' manifest.json \
-    >"$PLUGIN_PATH.new/manifest.json"
-  rm -rf "$PLUGIN_PATH"
-  mv "$PLUGIN_PATH.new" "$PLUGIN_PATH"
+    >"$staging/manifest.json"
+  echo "https://github.com/derekross/peridot" >"$staging/$MARKER"
+  chmod 755 "$staging"
+  if [[ -e $PLUGIN_PATH ]]; then
+    # Only reached for our own earlier copy (checked above).
+    rm -rf "${PLUGIN_PATH:?}"
+  fi
+  mv "$staging" "$PLUGIN_PATH"
 fi
 if command -v omarchy >/dev/null; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true

@@ -1,3 +1,5 @@
+# Installed by Peridot (https://github.com/derekross/peridot); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
 [Unit]
 Description=Peridot: keeps your Omarchy computers matching
 Documentation=https://github.com/derekross/peridot
