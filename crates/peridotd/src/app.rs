@@ -117,7 +117,13 @@ impl App {
                     tracing::info!("Opal no longer knows Peridot's pairing");
                 }
             }
+            let via_opal = identity.via_opal_mode();
             self.start_engine(identity, false).await?;
+            // The watcher only pairs once the engine knows the identity, so
+            // a missing or revoked token found above is announced now.
+            if via_opal && self.opal.needs_pairing() {
+                self.opal.changed().notify_one();
+            }
         }
         Ok(())
     }
