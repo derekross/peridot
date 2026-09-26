@@ -19,6 +19,42 @@ Column {
   property bool making: false
   property string kitPath: ""
   property bool confirmLeave: false
+  readonly property var relays: svc && svc.status.relays ? svc.status.relays : []
+  readonly property bool viaOpal: !!svc && !!svc.status.identity && svc.status.identity.mode === "opal"
+  property bool checkingRelay: false
+  property string relayError: ""
+  property string confirmRelayRemove: ""
+
+  function addRelay() {
+    var url = newRelay.text.trim().replace(/\/+$/, "")
+    if (url === "") return
+    if (url.indexOf("wss://") !== 0) { relayError = "Relay addresses start with wss://"; return }
+    if (checkingRelay) return
+    relayError = ""
+    checkingRelay = true
+    svc.call("relays.check", { url: url }, function(err, r) {
+      if (err || !r || !r.reachable) {
+        root.checkingRelay = false
+        root.relayError = err || ("Couldn't connect to " + url)
+        return
+      }
+      var list = root.relays.slice()
+      if (list.indexOf(url) === -1) list.push(url)
+      svc.call("relays.set", { relays: list }, function(err2) {
+        root.checkingRelay = false
+        if (err2) { root.relayError = err2; return }
+        newRelay.text = ""
+        root.svc.message("Added " + url, false)
+      })
+    })
+  }
+
+  function removeRelay(url) {
+    if (confirmRelayRemove !== url) { confirmRelayRemove = url; return }
+    confirmRelayRemove = ""
+    var list = root.relays.filter(function(r) { return r !== url })
+    svc.run("relays.set", { relays: list })
+  }
 
   spacing: Style.space(10)
 
@@ -105,6 +141,73 @@ Column {
     onClicked: root.svc.run("sync.pause", { paused: !checked })
   }
 
+  // ── Servers ────────────────────────────────────────────────────
+  PanelSectionHeader { text: "SERVERS"; foreground: root.dim }
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    wrapMode: Text.Wrap
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: "Your encrypted settings are stored on each of these. Add your own if you run one."
+  }
+  Repeater {
+    model: root.relays
+    delegate: Row {
+      required property var modelData
+      width: root.width
+      spacing: Style.space(8)
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width - relayRemove.width - Style.space(8)
+        anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideMiddle
+        color: root.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        text: modelData
+      }
+      PanelActionButton {
+        id: relayRemove
+        iconText: "󰆴"
+        hoverColor: root.urgent
+        tooltipText: root.confirmRelayRemove === modelData ? "Click again to remove" : "Remove"
+        onClicked: root.removeRelay(modelData)
+      }
+    }
+  }
+  Row {
+    width: parent.width
+    spacing: Style.space(8)
+    TextField {
+      id: newRelay
+      width: parent.width - addRelayButton.width - Style.space(8)
+      placeholderText: "wss://relay.example.com"
+      foreground: root.foreground
+      onAccepted: root.addRelay()
+    }
+    Button {
+      id: addRelayButton
+      text: root.checkingRelay ? "Checking…" : "Add"
+      iconText: "󰐕"
+      iconSpinning: root.checkingRelay
+      bordered: true
+      foreground: root.foreground
+      onClicked: root.addRelay()
+    }
+  }
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    visible: root.relayError !== ""
+    wrapMode: Text.Wrap
+    color: root.urgent
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: root.relayError
+  }
+
   // ── Recovery kit ───────────────────────────────────────────────
   PanelSectionHeader { text: "RECOVERY KIT"; foreground: root.dim }
   Text {
@@ -115,10 +218,12 @@ Column {
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
     visible: !root.kit
-    text: "If you ever lose every computer, a recovery kit brings your settings back: a page to save or print, and six words to write down."
+    text: root.viaOpal
+      ? "Opal holds your key, so your Opal backup (the ncryptsec you can copy in Opal's Profiles) is your recovery kit. On a new computer, restore it in Opal, then choose \"Use your Opal identity\" here."
+      : "If you ever lose every computer, a recovery kit brings your settings back: a page to save or print, and six words to write down."
   }
   Button {
-    visible: !root.kit
+    visible: !root.kit && !root.viaOpal
     text: root.making ? "Making your kit…" : "Make a recovery kit"
     iconText: "󰁯"
     iconSpinning: root.making

@@ -26,6 +26,11 @@ impl Drop for Daemon {
 
 impl Daemon {
     async fn start(relay: &str, name: &str) -> Self {
+        Self::start_with(relay, name, None).await
+    }
+
+    /// `opal` is the control socket of an Opal daemon (real or fake).
+    async fn start_with(relay: &str, name: &str, opal: Option<&Path>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
@@ -36,9 +41,14 @@ impl Daemon {
         )
         .unwrap();
         let socket = dir.path().join("peridot.sock");
-        let child = Command::new(env!("CARGO_BIN_EXE_peridotd"))
-            .args(["--memory-keyring", "--socket"])
-            .arg(&socket)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_peridotd"));
+        cmd.args(["--memory-keyring", "--socket"]).arg(&socket);
+        // Point at a socket that doesn't exist when there's no Opal.
+        cmd.arg("--opal-socket").arg(
+            opal.map(|p| p.to_path_buf())
+                .unwrap_or_else(|| dir.path().join("no-opal.sock")),
+        );
+        let child = cmd
             .arg("--config")
             .arg(&config)
             .arg("--db")
@@ -118,6 +128,18 @@ impl Client {
     }
 }
 
+/// A local relay for the test. MockRelay picks a port at random, and with
+/// several tests starting at once it occasionally lands on a taken one.
+async fn mock_relay() -> MockRelay {
+    for _ in 0..10 {
+        if let Ok(r) = MockRelay::run().await {
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no free port for a mock relay");
+}
+
 /// Poll until `check` passes (or fail after `secs`).
 async fn until(d: &Daemon, secs: u64, what: &str, check: impl Fn(&Value) -> bool) -> Value {
     for _ in 0..secs * 5 {
@@ -132,7 +154,7 @@ async fn until(d: &Daemon, secs: u64, what: &str, check: impl Fn(&Value) -> bool
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pair_then_sync_a_change() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await.to_string();
     let desk = Daemon::start(&url, "Desk").await;
     let laptop = Daemon::start(&url, "Laptop").await;
@@ -241,7 +263,7 @@ async fn pair_then_sync_a_change() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn subscribers_get_the_state_and_live_events() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await.to_string();
     let d = Daemon::start(&url, "Desk").await;
     let mut c = Client::open(&d.socket).await;
@@ -265,7 +287,7 @@ async fn subscribers_get_the_state_and_live_events() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_answer_to_the_number_shares_nothing() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await.to_string();
     let desk = Daemon::start(&url, "Desk").await;
     let laptop = Daemon::start(&url, "Laptop").await;
@@ -291,7 +313,7 @@ async fn a_wrong_answer_to_the_number_shares_nothing() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn recovery_kit_restores_on_a_new_computer() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await.to_string();
     let old = Daemon::start(&url, "Old").await;
     old.write(".config/kitty/kitty.conf", "font_size 13");
@@ -324,4 +346,267 @@ async fn recovery_kit_restores_on_a_new_computer() {
         new.read(".config/kitty/kitty.conf").unwrap(),
         "font_size 13"
     );
+}
+
+/// A stand-in for the Opal daemon: one account, answers the calls Peridot
+/// makes (`status`, `app.sign`, `app.nip44`), and can be "locked".
+struct FakeOpal {
+    socket: PathBuf,
+    keys: nostr_sdk::prelude::Keys,
+    locked: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _dir: tempfile::TempDir,
+}
+
+impl FakeOpal {
+    async fn start(label: &str) -> Self {
+        use nostr_sdk::prelude::*;
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("opal.sock");
+        let keys = Keys::generate();
+        let locked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let (k, l, label) = (keys.clone(), locked.clone(), label.to_string());
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let (k, l, label) = (k.clone(), l.clone(), label.clone());
+                tokio::spawn(async move {
+                    let (r, mut w) = stream.into_split();
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let req: Value = serde_json::from_str(&line).unwrap();
+                        let id = req["id"].clone();
+                        let p = &req["params"];
+                        let locked = l.load(std::sync::atomic::Ordering::SeqCst);
+                        let result: Result<Value, String> = match req["method"]
+                            .as_str()
+                            .unwrap_or("")
+                        {
+                            "status" | "subscribe" => Ok(json!({
+                                "has_accounts": true,
+                                "accounts": [{"pubkey": k.public_key().to_hex(), "label": label,
+                                              "npub": k.public_key().to_bech32().unwrap(), "current": true}],
+                            })),
+                            "app.sign" if locked => Err("Opal is locked".into()),
+                            "app.sign" => {
+                                let unsigned: UnsignedEvent =
+                                    serde_json::from_value(p["event"].clone()).unwrap();
+                                assert_eq!(p["app"], json!("peridot"));
+                                assert!(
+                                    [30078u16, 5, 21078, 22242].contains(&unsigned.kind.as_u16()),
+                                    "kind {}",
+                                    unsigned.kind
+                                );
+                                Ok(json!(k.sign_event(unsigned).unwrap()))
+                            }
+                            "app.nip44" if locked => Err("Opal is locked".into()),
+                            "app.nip44" => {
+                                let content = p["content"].as_str().unwrap();
+                                let out = match p["op"].as_str().unwrap() {
+                                    "encrypt" => nip44::encrypt(
+                                        k.secret_key(),
+                                        &k.public_key(),
+                                        content,
+                                        nip44::Version::V2,
+                                    )
+                                    .unwrap(),
+                                    _ => nip44::decrypt(k.secret_key(), &k.public_key(), content)
+                                        .unwrap(),
+                                };
+                                Ok(json!({"content": out}))
+                            }
+                            m => Err(format!("unknown method: {m}")),
+                        };
+                        let resp = match result {
+                            Ok(v) => json!({"id": id, "result": v}),
+                            Err(e) => json!({"id": id, "error": e}),
+                        };
+                        if w.write_all((resp.to_string() + "\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        Self {
+            socket,
+            keys,
+            locked,
+            _dir: dir,
+        }
+    }
+
+    fn set_locked(&self, locked: bool) {
+        self.locked
+            .store(locked, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
+
+    // The welcome screen sees Opal's account; setting up adopts it.
+    let s = desk.status().await;
+    assert_eq!(s["opal_accounts"][0]["label"], json!("Derek"), "{s}");
+    desk.write(
+        ".config/hypr/bindings.lua",
+        "bind = SUPER, Return, exec, ghostty",
+    );
+    // A key with nothing on the servers yet can be set up while Opal is
+    // locked: the first publishes simply wait for the unlock.
+    opal.set_locked(true);
+    desk.call("setup.use_opal", json!({})).await;
+    let s = until(&desk, 20, "desk waiting for unlock", |s| {
+        s["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("Unlock Opal"))
+    })
+    .await;
+    assert_eq!(s["set_up"], json!(true));
+    assert_eq!(s["counts"]["in_sync"], json!(0));
+    opal.set_locked(false);
+    desk.call("sync.now", json!(null)).await;
+    let s = until(&desk, 20, "desk to publish via Opal", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    assert_eq!(s["identity"]["mode"], json!("opal"));
+    assert_eq!(s["identity"]["name"], json!("Derek"));
+    assert_eq!(
+        s["identity"]["pubkey"],
+        json!(opal.keys.public_key().to_hex())
+    );
+
+    // A computer without Opal can't take an Opal-held identity.
+    let bare = Daemon::start(&url, "Bare").await;
+    let code = bare.call("pair.new", json!(null)).await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    desk.call("pair.join", json!({"code": code})).await;
+    until(&desk, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"matches": true})).await;
+    let s = until(&bare, 20, "bare to fail", |s| {
+        s["pairing"]["stage"] == json!("failed")
+    })
+    .await;
+    assert!(
+        s["pairing"]["error"].as_str().unwrap().contains("Opal"),
+        "{s}"
+    );
+    assert_eq!(bare.status().await["set_up"], json!(false));
+
+    // One with Opal (same key) pairs and gets the settings.
+    let laptop = Daemon::start_with(&url, "Laptop", Some(&opal.socket)).await;
+    let code = laptop.call("pair.new", json!(null)).await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    desk.call("pair.cancel", json!(null)).await;
+    desk.call("pair.join", json!({"code": code})).await;
+    until(&desk, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"matches": true})).await;
+    until(&laptop, 20, "laptop set up", |s| s["set_up"] == json!(true)).await;
+    until(&laptop, 20, "incoming", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    laptop.call("apply", json!({})).await;
+    assert_eq!(
+        laptop.read(".config/hypr/bindings.lua").unwrap(),
+        "bind = SUPER, Return, exec, ghostty"
+    );
+
+    // Locked Opal holds outgoing changes; unlocking lets them through.
+    opal.set_locked(true);
+    laptop.write(
+        ".config/hypr/bindings.lua",
+        "bind = SUPER, Return, exec, kitty",
+    );
+    let s = until(&laptop, 20, "held while locked", |s| {
+        s["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("Unlock Opal"))
+    })
+    .await;
+    assert_eq!(s["counts"]["outgoing"], json!(1));
+    opal.set_locked(false);
+    laptop.call("sync.now", json!(null)).await;
+    until(&laptop, 20, "published after unlock", |s| {
+        s["counts"]["outgoing"] == json!(0) && s["error"].is_null()
+    })
+    .await;
+    until(&desk, 20, "desk sees it", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+
+    // A key that already has settings on the servers must not be set up
+    // while Opal is locked: that would mint a new sync secret over the
+    // existing one. Unlocked, it rejoins its settings without pairing.
+    let third = Daemon::start_with(&url, "Third", Some(&opal.socket)).await;
+    opal.set_locked(true);
+    let mut c3 = Client::open(&third.socket).await;
+    let err = c3.call("setup.use_opal", json!({})).await.unwrap_err();
+    assert!(err.contains("Unlock Opal"), "{err}");
+    assert_eq!(third.status().await["set_up"], json!(false));
+    opal.set_locked(false);
+    third.call("setup.use_opal", json!({})).await;
+    until(&third, 20, "third rejoins", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+
+    // No recovery kit in Opal mode: Opal's backup is the kit.
+    let mut c = Client::open(&laptop.socket).await;
+    let err = c.call("recovery.create", json!(null)).await.unwrap_err();
+    assert!(err.contains("Opal"), "{err}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn importing_the_same_key_rejoins_its_settings() {
+    use nostr_sdk::prelude::{Keys, ToBech32};
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let keys = Keys::generate();
+    let nsec = keys.secret_key().to_bech32().unwrap();
+
+    let a = Daemon::start(&url, "A").await;
+    a.write(".config/kitty/kitty.conf", "font_size 13");
+    a.call("setup.import", json!({"secret": nsec})).await;
+    let s = until(&a, 20, "publish", |s| s["counts"]["in_sync"] == json!(1)).await;
+    assert_eq!(s["identity"]["mode"], json!("local"));
+    assert_eq!(s["identity"]["pubkey"], json!(keys.public_key().to_hex()));
+
+    // The same key on another computer finds the existing settings (no
+    // pairing needed): same sync secret, so the file arrives.
+    let b = Daemon::start(&url, "B").await;
+    let mut c = Client::open(&b.socket).await;
+    assert!(
+        c.call("setup.import", json!({"secret": "nsec1notakey"}))
+            .await
+            .is_err()
+    );
+    b.call("setup.import", json!({"secret": nsec})).await;
+    until(&b, 20, "incoming on B", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    b.call("apply", json!({})).await;
+    assert_eq!(b.read(".config/kitty/kitty.conf").unwrap(), "font_size 13");
 }

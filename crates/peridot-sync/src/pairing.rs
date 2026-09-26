@@ -142,9 +142,22 @@ impl Code {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum Message {
-    Hello { name: String, mac: String },
-    Reply { name: String, mac: String },
-    Transfer { key: String, sync_secret: String },
+    Hello {
+        name: String,
+        mac: String,
+    },
+    Reply {
+        name: String,
+        mac: String,
+    },
+    /// The identity: its key when this computer holds it, or just the
+    /// public key when Opal does (the new computer needs Opal too).
+    Transfer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        pubkey: String,
+        sync_secret: String,
+    },
     Done,
 }
 
@@ -257,11 +270,28 @@ impl Joiner {
                 if ev.pubkey != sponsor {
                     return Err(PairError::Unexpected);
                 }
-                let Message::Transfer { key, sync_secret } = receive(&self.me, ev)? else {
+                let Message::Transfer {
+                    key,
+                    pubkey,
+                    sync_secret,
+                } = receive(&self.me, ev)?
+                else {
                     return Err(PairError::Unexpected);
                 };
+                let pubkey = PublicKey::from_hex(&pubkey).map_err(|_| PairError::Invalid)?;
+                let keys = match key {
+                    Some(k) => {
+                        let keys = Keys::parse(&k).map_err(|_| PairError::Invalid)?;
+                        if keys.public_key() != pubkey {
+                            return Err(PairError::Invalid);
+                        }
+                        Some(keys)
+                    }
+                    None => None,
+                };
                 let identity = Identity {
-                    keys: Keys::parse(&key).map_err(|_| PairError::Invalid)?,
+                    pubkey,
+                    keys,
                     secret: SyncSecret::from_hex(&sync_secret).map_err(|_| PairError::Invalid)?,
                 };
                 self.done = true;
@@ -366,7 +396,11 @@ impl Sponsor {
             &self.me,
             &joiner,
             &Message::Transfer {
-                key: identity.keys.secret_key().to_secret_hex(),
+                key: identity
+                    .keys
+                    .as_ref()
+                    .map(|k| k.secret_key().to_secret_hex()),
+                pubkey: identity.pubkey.to_hex(),
                 sync_secret: identity.secret.to_hex(),
             },
         )
@@ -451,6 +485,24 @@ mod tests {
             joiner.handle(&transfer, 1003).err(),
             Some(PairError::Unexpected)
         );
+    }
+
+    #[test]
+    fn an_opal_held_identity_pairs_without_its_key() {
+        let id = Identity::via_opal(Keys::generate().public_key());
+        let mut joiner = Joiner::new("New", 0);
+        let (mut sponsor, hello) = Sponsor::start(&joiner.code(), "Desk").unwrap();
+        let JoinerStep::ShowNumber { reply, .. } = joiner.handle(&hello, 1).unwrap() else {
+            panic!()
+        };
+        sponsor.handle(&reply).unwrap();
+        let transfer = sponsor.confirm(&id).unwrap();
+        let JoinerStep::Paired { identity, .. } = joiner.handle(&transfer, 2).unwrap() else {
+            panic!()
+        };
+        assert_eq!(identity.pubkey(), id.pubkey());
+        assert!(identity.via_opal_mode());
+        assert_eq!(identity.secret.to_hex(), id.secret.to_hex());
     }
 
     #[test]

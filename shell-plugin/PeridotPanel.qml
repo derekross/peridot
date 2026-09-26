@@ -111,8 +111,11 @@ Item {
                 if (!root.up) return "Not running"
                 var s = root.svc
                 if (!s.setUp) return "Keep your Omarchy computers matching"
-                if (s.paused) return (s.status.device_name || "This computer") + " · paused"
-                var parts = [s.status.device_name || "This computer"]
+                var id = s.status.identity || {}
+                var who = id.name || U.shortKey(id.npub || "")
+                if (id.mode === "opal") who += " via Opal"
+                if (s.paused) return (s.status.device_name || "This computer") + " · " + who + " · paused"
+                var parts = [s.status.device_name || "This computer", who]
                 var waiting = s.attention
                 parts.push(waiting > 0 ? waiting + " waiting" : "everything matches")
                 if (s.status.last_sync) parts.push("checked " + U.ago(s.status.last_sync, s.now))

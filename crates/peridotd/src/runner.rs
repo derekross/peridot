@@ -37,9 +37,13 @@ pub fn spawn(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> JoinHandle<
 
 async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Result<()> {
     engine.connect().await;
+    // Setup publishes that need the signer (the root event for a new
+    // identity, this device's entry). With Opal locked or not running yet
+    // they wait and are retried, rather than stopping sync.
+    let mut root_pending = fresh;
+    let mut announced = false;
     if fresh {
         engine.mark_caught_up();
-        engine.publish_root().await?;
     }
     // Always catch up before saying anything, so we don't publish over
     // newer changes from elsewhere. Until it works, nothing is published.
@@ -58,7 +62,7 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             }
         }
     }
-    engine.announce().await?;
+    setup_publishes(&app, &engine, &mut root_pending, &mut announced).await;
     if !app.config.read().await.paused {
         publish(&app, &engine).await;
     }
@@ -118,6 +122,7 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             _ = app.nudge.notified() => {
                 // An apply may have created folders we couldn't watch before.
                 watcher = watch(&engine, fs_tx.clone()).await;
+                setup_publishes(&app, &engine, &mut root_pending, &mut announced).await;
                 let paused = app.config.read().await.paused;
                 if engine.catch_up().await.is_ok_and(|n| n > 0) {
                     after_incoming(&app, &engine, &mut waiting).await;
@@ -129,7 +134,16 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
                 app.emit_state().await;
             }
             _ = flush.tick() => {
-                if engine.flush().await > 0 {
+                setup_publishes(&app, &engine, &mut root_pending, &mut announced).await;
+                let mut changed = engine.flush().await > 0;
+                // Anything held back (e.g. Opal was locked) gets another go.
+                if !app.config.read().await.paused
+                    && engine.overview().await.count(FileStatus::Outgoing) > 0
+                {
+                    publish(&app, &engine).await;
+                    changed = true;
+                }
+                if changed {
                     app.emit_state().await;
                 }
             }
@@ -153,6 +167,33 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
     }
     drop(watcher);
     Ok(())
+}
+
+/// The root event and this device's entry, until both have gone out.
+async fn setup_publishes(
+    app: &Arc<App>,
+    engine: &Arc<SyncEngine>,
+    root_pending: &mut bool,
+    announced: &mut bool,
+) {
+    if *root_pending {
+        match engine.publish_root().await {
+            Ok(()) => *root_pending = false,
+            Err(e) => {
+                app.set_error(Some(format!("{e} (finishing setup)"))).await;
+                return;
+            }
+        }
+    }
+    if !*announced {
+        match engine.announce().await {
+            Ok(()) => {
+                *announced = true;
+                app.set_error(None).await;
+            }
+            Err(e) => app.set_error(Some(e.to_string())).await,
+        }
+    }
 }
 
 async fn publish(app: &Arc<App>, engine: &Arc<SyncEngine>) {

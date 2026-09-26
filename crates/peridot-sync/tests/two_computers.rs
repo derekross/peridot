@@ -6,10 +6,10 @@ use std::time::Duration;
 use nostr_sdk::prelude::*;
 use opal_core::db::Db;
 use opal_kit::relays::Outbox;
-use opal_kit::signer::KeysSigner;
 use peridot_sync::apply::Home;
 use peridot_sync::identity::Identity;
 use peridot_sync::manifest::{Choices, Manifest};
+use peridot_sync::signer::LocalSigner;
 use peridot_sync::store::{FileStatus, SyncStore};
 use peridot_sync::sync::{SyncEngine, SyncParams};
 
@@ -26,7 +26,7 @@ impl Computer {
         let db = Db::open_in_memory().unwrap();
         let engine = SyncEngine::new(SyncParams {
             identity: identity.clone(),
-            signer: Arc::new(KeysSigner(identity.keys.clone())),
+            signer: Arc::new(LocalSigner(identity.keys.clone().unwrap())),
             store: SyncStore::new(db.clone()).unwrap(),
             outbox: Outbox::new(db).unwrap(),
             home: Home::open(home.path()).unwrap(),
@@ -77,9 +77,20 @@ impl Computer {
 
 const BINDINGS: &str = ".config/hypr/bindings.lua";
 
+/// MockRelay picks a random port; retry the rare collision.
+async fn mock_relay() -> MockRelay {
+    for _ in 0..10 {
+        if let Ok(r) = MockRelay::run().await {
+            return r;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no free port for a mock relay");
+}
+
 #[tokio::test]
 async fn edits_flow_between_computers_and_can_be_undone() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -157,7 +168,7 @@ async fn edits_flow_between_computers_and_can_be_undone() {
 
 #[tokio::test]
 async fn concurrent_edits_become_a_conflict_and_either_side_can_win() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -188,7 +199,7 @@ async fn concurrent_edits_become_a_conflict_and_either_side_can_win() {
 
 #[tokio::test]
 async fn deletions_and_big_files_sync() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -215,7 +226,7 @@ async fn deletions_and_big_files_sync() {
 
 #[tokio::test]
 async fn secrets_and_other_identities_stay_out() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -237,7 +248,7 @@ async fn secrets_and_other_identities_stay_out() {
 
 #[tokio::test]
 async fn devices_and_theme_are_shared() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -268,7 +279,7 @@ async fn devices_and_theme_are_shared() {
 
 #[tokio::test]
 async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
-    let relay = MockRelay::run().await.unwrap();
+    let relay = mock_relay().await;
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
@@ -282,7 +293,7 @@ async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
     let db = Db::open_in_memory().unwrap();
     let laptop = SyncEngine::new(SyncParams {
         identity: id.clone(),
-        signer: Arc::new(KeysSigner(id.keys.clone())),
+        signer: Arc::new(LocalSigner(id.keys.clone().unwrap())),
         store: SyncStore::new(db.clone()).unwrap(),
         outbox: Outbox::new(db).unwrap(),
         home: Home::open(home.path()).unwrap(),

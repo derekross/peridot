@@ -11,6 +11,7 @@ pub mod manifest;
 pub mod pairing;
 pub mod recovery;
 pub mod scan;
+pub mod signer;
 pub mod store;
 pub mod sync;
 

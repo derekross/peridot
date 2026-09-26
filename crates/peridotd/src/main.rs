@@ -5,6 +5,7 @@ mod app;
 mod config;
 mod ipc;
 mod notify;
+mod opal;
 mod pair;
 mod runner;
 
@@ -39,6 +40,9 @@ struct Args {
     /// Keep the identity in memory instead of the keyring (development only).
     #[arg(long, hide = true)]
     memory_keyring: bool,
+    /// Opal's control socket (development only).
+    #[arg(long, hide = true)]
+    opal_socket: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -93,6 +97,9 @@ async fn main() -> Result<()> {
         secrets,
         home,
         data_dir,
+        opal_socket: args
+            .opal_socket
+            .unwrap_or_else(|| AppDirs::OPAL.socket_path()),
     });
     // Say so plainly if the sandbox breaks file access, instead of every
     // file quietly showing as unreadable.

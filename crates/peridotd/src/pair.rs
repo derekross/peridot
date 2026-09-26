@@ -134,6 +134,13 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
                         Ok(JoinerStep::Paired { identity, reply }) => {
                             let _ = send(&client, &relays, &reply).await;
                             let result = async {
+                                if identity.via_opal_mode()
+                                    && !app.opal.has_account(&identity.pubkey()).await
+                                {
+                                    anyhow::bail!(
+                                        "your other computer's identity is held by Opal. Set up Opal with the same key on this computer first, then pair again"
+                                    );
+                                }
                                 identity.save(&app.secrets).await?;
                                 app.start_engine(*identity, false).await
                             }.await;

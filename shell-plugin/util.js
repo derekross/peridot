@@ -10,6 +10,11 @@ function ago(secs, nowMs) {
   return new Date(secs * 1000).toLocaleDateString()
 }
 
+function shortKey(s) {
+  if (!s) return ""
+  return s.length > 20 ? s.slice(0, 12) + "…" + s.slice(-6) : s
+}
+
 // Friendly names for what syncs.
 var names = [
   [".config/hypr/bindings.lua", "Keyboard shortcuts"],

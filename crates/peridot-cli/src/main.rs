@@ -32,8 +32,20 @@ struct Cli {
 enum Cmd {
     /// What's in sync, waiting or in conflict (the default).
     Status,
-    /// Set up Peridot on this computer as your first one.
-    Start,
+    /// Set up Peridot on this computer. With Opal installed, offers its
+    /// identity; otherwise makes a new one.
+    Start {
+        /// Use the identity Opal holds (optionally which account, by name
+        /// or npub/pubkey prefix).
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        opal: Option<String>,
+        /// Use a key you already have (asks for the nsec/ncryptsec).
+        #[arg(long)]
+        import: bool,
+        /// Make a brand-new identity even if Opal is installed.
+        #[arg(long)]
+        fresh: bool,
+    },
     /// Pair a new computer. Run on the new one; then run
     /// `peridot pair <code>` on a computer you already use.
     Pair {
@@ -61,6 +73,11 @@ enum Cmd {
     Resume,
     /// Your computers.
     Devices,
+    /// The servers your encrypted settings are stored on.
+    Relays {
+        #[command(subcommand)]
+        cmd: Option<RelaysCmd>,
+    },
     /// Remove a computer from your list.
     RemoveDevice {
         id: String,
@@ -71,6 +88,17 @@ enum Cmd {
     Restore,
     /// Stop syncing on this computer (your others keep going).
     Leave,
+}
+
+#[derive(Subcommand)]
+enum RelaysCmd {
+    /// Add a relay (wss://…); it's checked first.
+    Add {
+        url: String,
+    },
+    Remove {
+        url: String,
+    },
 }
 
 struct Conn {
@@ -178,11 +206,118 @@ async fn run() -> Result<()> {
                 print_status(&s);
             }
         }
-        Cmd::Start => {
-            c.call("setup.start_fresh", json!(null)).await?;
-            println!("Peridot is set up. Your settings now sync from this computer.");
-            println!("Add another computer with `peridot pair` on it.");
-            println!("Tip: make a recovery kit with `peridot recovery`.");
+        Cmd::Start {
+            opal,
+            import,
+            fresh,
+        } => {
+            let accounts = c.call("opal.accounts", json!(null)).await?;
+            let accounts = accounts.as_array().cloned().unwrap_or_default();
+            let opal_pick = |wanted: &str| -> Option<Value> {
+                if wanted.is_empty() {
+                    return accounts
+                        .iter()
+                        .find(|a| a["current"] == json!(true))
+                        .or(accounts.first())
+                        .cloned();
+                }
+                let w = wanted.to_lowercase();
+                accounts
+                    .iter()
+                    .find(|a| {
+                        a["label"].as_str().is_some_and(|l| l.to_lowercase() == w)
+                            || a["pubkey"].as_str().is_some_and(|p| p.starts_with(&w))
+                            || a["npub"].as_str().is_some_and(|n| n.starts_with(&w))
+                    })
+                    .cloned()
+            };
+            if import {
+                let secret = rpassword::prompt_password(
+                    "Your key (nsec, hex, ncryptsec or recovery phrase): ",
+                )?;
+                let mut params = json!({"secret": secret.trim()});
+                if secret.trim().starts_with("ncryptsec1") {
+                    params["password"] =
+                        json!(rpassword::prompt_password("Password of that ncryptsec: ")?);
+                }
+                c.call("setup.import", params).await?;
+                println!("Peridot is set up with your key.");
+            } else if let Some(wanted) = opal {
+                let account = opal_pick(&wanted).ok_or_else(|| {
+                    anyhow!(if accounts.is_empty() {
+                        "Opal isn't running or has no key yet".to_string()
+                    } else {
+                        format!("Opal has no account matching \"{wanted}\"")
+                    })
+                })?;
+                c.call("setup.use_opal", json!({"pubkey": account["pubkey"]}))
+                    .await?;
+                println!(
+                    "Peridot is set up with your Opal identity ({}).",
+                    account["label"].as_str().unwrap_or("")
+                );
+            } else if !fresh && let Some(account) = opal_pick("") {
+                let label = account["label"].as_str().unwrap_or("").to_string();
+                if yes(&format!(
+                    "Use your Opal identity \"{label}\"? (No makes a new one)"
+                ))? {
+                    c.call("setup.use_opal", json!({"pubkey": account["pubkey"]}))
+                        .await?;
+                    println!("Peridot is set up with your Opal identity ({label}).");
+                } else {
+                    c.call("setup.start_fresh", json!(null)).await?;
+                    println!("Peridot is set up with a new identity.");
+                }
+            } else {
+                c.call("setup.start_fresh", json!(null)).await?;
+                println!("Peridot is set up with a new identity.");
+            }
+            println!(
+                "Your settings now sync from this computer. Add another with `peridot pair` on it."
+            );
+            println!("Tip: `peridot recovery` makes a recovery kit.");
+        }
+        Cmd::Relays { cmd } => {
+            let s = c.call("status", json!(null)).await?;
+            let mut relays: Vec<String> = s["relays"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r.as_str().map(String::from))
+                .collect();
+            match cmd {
+                None => {
+                    for r in &relays {
+                        println!("{r}");
+                    }
+                }
+                Some(RelaysCmd::Add { url }) => {
+                    let url = url.trim().trim_end_matches('/').to_string();
+                    println!("Checking {url}…");
+                    let check = c.call("relays.check", json!({"url": url})).await?;
+                    if check["reachable"] != json!(true) {
+                        bail!("couldn't connect to {url}");
+                    }
+                    if check["auth_required"] == json!(true) {
+                        println!("  (it asks for a login; Peridot handles that)");
+                    }
+                    if !relays.contains(&url) {
+                        relays.push(url.clone());
+                    }
+                    c.call("relays.set", json!({"relays": relays})).await?;
+                    println!("Added {url}. Your settings will be stored there too.");
+                }
+                Some(RelaysCmd::Remove { url }) => {
+                    let url = url.trim().trim_end_matches('/');
+                    let before = relays.len();
+                    relays.retain(|r| r != url);
+                    if relays.len() == before {
+                        bail!("{url} isn't in the list");
+                    }
+                    c.call("relays.set", json!({"relays": relays})).await?;
+                    println!("Removed {url}.");
+                }
+            }
         }
         Cmd::Pair { code: None } => {
             c.call("subscribe", json!(null)).await?;
@@ -370,9 +505,23 @@ fn print_status(s: &Value) {
         return;
     }
     let n = |k: &str| s["counts"][k].as_u64().unwrap_or(0);
+    let id = &s["identity"];
+    let who = match id["name"].as_str().filter(|x| !x.is_empty()) {
+        Some(name) => name.to_string(),
+        None => id["npub"]
+            .as_str()
+            .map(|n| format!("{}…{}", &n[..12], &n[n.len() - 6..]))
+            .unwrap_or_default(),
+    };
     println!(
-        "{} · {} in sync",
+        "{} · {}{} · {} in sync",
         s["device_name"].as_str().unwrap_or(""),
+        who,
+        if id["mode"] == json!("opal") {
+            " (via Opal)"
+        } else {
+            ""
+        },
         n("in_sync")
     );
     if s["paused"] == json!(true) {

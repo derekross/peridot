@@ -10,10 +10,10 @@ use opal_core::db::Db;
 use opal_core::ipc::IpcEvent;
 use opal_core::keystore::SecretStore;
 use opal_kit::relays::Outbox;
-use opal_kit::signer::KeysSigner;
 use peridot_sync::apply::Home;
 use peridot_sync::identity::Identity;
 use peridot_sync::manifest::Manifest;
+use peridot_sync::signer::{IdentitySigner, LocalSigner, SignerAuth};
 use peridot_sync::store::{FileStatus, SyncStore};
 use peridot_sync::sync::{SyncEngine, SyncParams};
 use serde_json::{Value, json};
@@ -30,6 +30,7 @@ pub struct Options {
     pub secrets: SecretStore,
     pub home: PathBuf,
     pub data_dir: PathBuf,
+    pub opal_socket: PathBuf,
 }
 
 pub struct App {
@@ -39,6 +40,7 @@ pub struct App {
     pub secrets: SecretStore,
     pub home: PathBuf,
     pub data_dir: PathBuf,
+    pub opal: crate::opal::OpalClient,
     pub events: broadcast::Sender<IpcEvent>,
     pub engine: RwLock<Option<Arc<SyncEngine>>>,
     pub runner: Mutex<Option<JoinHandle<()>>>,
@@ -59,6 +61,7 @@ impl App {
             secrets: o.secrets,
             home: o.home,
             data_dir: o.data_dir,
+            opal: crate::opal::OpalClient::new(&o.opal_socket),
             events,
             engine: RwLock::new(None),
             runner: Mutex::new(None),
@@ -107,12 +110,19 @@ impl App {
         }
         let cfg = self.config.read().await.clone();
         let store = SyncStore::new(self.db.clone())?;
+        let signer: Arc<dyn IdentitySigner> = match &identity.keys {
+            Some(keys) => Arc::new(LocalSigner(keys.clone())),
+            None => Arc::new(crate::opal::OpalSigner::new(
+                self.opal.clone(),
+                identity.pubkey(),
+            )),
+        };
         // Signs relay logins (NIP-42), which private-data relays require.
         let client = Client::builder()
-            .authenticator(SignerAuthenticator::new(identity.keys.clone()))
+            .authenticator(SignerAuth(signer.clone()))
             .build();
         let engine = Arc::new(SyncEngine::new(SyncParams {
-            signer: Arc::new(KeysSigner(identity.keys.clone())),
+            signer,
             identity,
             store,
             outbox: Outbox::new(self.db.clone())?,
@@ -211,6 +221,8 @@ impl App {
         });
         let Some(engine) = self.engine.read().await.clone() else {
             let mut v = base;
+            // The welcome screen offers Opal's accounts when there are any.
+            v["opal_accounts"] = json!(self.opal.accounts().await);
             v["set_up"] = json!(false);
             return v;
         };
@@ -219,6 +231,13 @@ impl App {
         let mut v = base;
         v["set_up"] = json!(true);
         v["device_id"] = json!(engine.device_id());
+        let identity = engine.identity();
+        v["identity"] = json!({
+            "mode": if identity.via_opal_mode() { "opal" } else { "local" },
+            "pubkey": identity.pubkey().to_hex(),
+            "npub": identity.pubkey().to_bech32().ok(),
+            "name": self.db.get_kv("peridot.identity_name").ok().flatten(),
+        });
         v["counts"] = json!({
             "in_sync": overview.count(FileStatus::InSync),
             "outgoing": overview.count(FileStatus::Outgoing),

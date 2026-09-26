@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use nostr_sdk::prelude::*;
 use opal_kit::relays::Outbox;
-use opal_kit::signer::{EventSigner, SIGN_TIMEOUT, sign_within};
+use opal_kit::signer::{SIGN_TIMEOUT, sign_within};
 use serde::Serialize;
 use tokio::sync::RwLock;
 
@@ -33,7 +33,7 @@ const KEEP_BACKUPS: usize = 20;
 
 pub struct SyncParams {
     pub identity: Identity,
-    pub signer: Arc<dyn EventSigner>,
+    pub signer: Arc<dyn crate::signer::IdentitySigner>,
     pub store: SyncStore,
     pub outbox: Outbox,
     pub home: Home,
@@ -52,7 +52,7 @@ pub struct SyncEngine {
     device: String,
     device_name: String,
     version: String,
-    signer: Arc<dyn EventSigner>,
+    signer: Arc<dyn crate::signer::IdentitySigner>,
     pub store: SyncStore,
     outbox: Outbox,
     home: Home,
@@ -465,7 +465,8 @@ impl SyncEngine {
     /// Publish the root event (the sync secret, encrypted to our own key)
     /// so a recovery kit can restore everything.
     pub async fn publish_root(&self) -> anyhow::Result<()> {
-        self.outbox.push(&self.identity.root_event()?)?;
+        self.outbox
+            .push(&self.identity.root_event(self.signer.as_ref()).await?)?;
         self.flush().await;
         Ok(())
     }

@@ -14,12 +14,28 @@ Column {
   property string mode: ""
   property bool busy: false
   property string error: ""
+  readonly property var opalAccounts: svc && svc.status.opal_accounts ? svc.status.opal_accounts : []
+  property string opalPick: ""
+  readonly property var opalChosen: {
+    for (var i = 0; i < opalAccounts.length; i++) if (opalAccounts[i].pubkey === opalPick) return opalAccounts[i]
+    for (var j = 0; j < opalAccounts.length; j++) if (opalAccounts[j].current) return opalAccounts[j]
+    return opalAccounts.length > 0 ? opalAccounts[0] : null
+  }
 
   spacing: Style.space(10)
 
-  onVisibleChanged: if (!visible) { code.text = ""; words.text = ""; error = ""; mode = "" }
+  onVisibleChanged: if (!visible) { code.text = ""; words.text = ""; secret.text = ""; secretPass.text = ""; error = ""; mode = "" }
 
-  function para(t) { return t }
+  function start(method, params) {
+    if (busy) return
+    error = ""
+    busy = true
+    svc.call(method, params, function(err) {
+      root.busy = false
+      if (err) root.error = err
+      else { secret.text = ""; secretPass.text = "" }
+    })
+  }
 
   Text {
     textFormat: Text.PlainText
@@ -41,28 +57,71 @@ Column {
     text: "Never synced: passwords, keys, tokens, browser data, your monitor layout. Nothing changes on a computer until you apply it, and every change can be undone."
   }
 
+  // Opal is installed and has a key: the natural identity to use.
+  Column {
+    width: parent.width
+    spacing: Style.space(6)
+    visible: root.mode === "" && root.opalAccounts.length > 0
+    PanelSectionHeader { text: "YOUR OPAL IDENTITY"; foreground: root.dim }
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      text: "Your key stays in Opal; Peridot asks it to sign. Syncing out pauses while Opal is locked."
+    }
+    ButtonGroup {
+      width: parent.width
+      visible: root.opalAccounts.length > 1
+      options: root.opalAccounts.map(function(a) { return { value: a.pubkey, label: a.label } })
+      value: root.opalChosen ? root.opalChosen.pubkey : ""
+      foreground: root.foreground
+      onChanged: function(v) { root.opalPick = v }
+    }
+    Button {
+      width: parent.width
+      leftAlign: true
+      bordered: true
+      iconText: "󰇈"
+      text: "Use " + (root.opalChosen ? root.opalChosen.label : "your Opal identity")
+      foreground: root.foreground
+      iconSpinning: root.busy
+      onClicked: root.start("setup.use_opal", { pubkey: root.opalChosen ? root.opalChosen.pubkey : null })
+    }
+  }
+
   Column {
     width: parent.width
     spacing: Style.space(6)
     visible: root.mode === ""
 
+    PanelSectionHeader {
+      visible: root.opalAccounts.length > 0
+      text: "OR"
+      foreground: root.dim
+    }
     Button {
       width: parent.width
       leftAlign: true
       bordered: true
       iconText: "󰐕"
-      text: "Start fresh on this computer"
-      tooltipText: "This is the first computer you use Peridot on"
+      text: "Start fresh with a new identity"
+      tooltipText: "Makes a new key just for you"
       foreground: root.foreground
       iconSpinning: root.busy
-      onClicked: {
-        if (root.busy) return
-        root.busy = true
-        root.svc.call("setup.start_fresh", null, function(err) {
-          root.busy = false
-          if (err) root.error = err
-        })
-      }
+      onClicked: root.start("setup.start_fresh", null)
+    }
+    Button {
+      width: parent.width
+      leftAlign: true
+      bordered: true
+      iconText: "󰌆"
+      text: "Use a key I already have"
+      tooltipText: "An nsec or ncryptsec from another Nostr app"
+      foreground: root.foreground
+      onClicked: { root.mode = "import"; root.error = "" }
     }
     Button {
       width: parent.width
@@ -80,6 +139,61 @@ Column {
       text: "Use my recovery kit"
       foreground: root.foreground
       onClicked: { root.mode = "restore"; root.error = "" }
+    }
+  }
+
+  Column {
+    width: parent.width
+    spacing: Style.space(8)
+    visible: root.mode === "import"
+
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.bodySmall
+      text: "Paste your key. It's kept in this computer's keyring, protected by your login. If the same key has used Peridot before, its settings are picked up."
+    }
+    TextField {
+      id: secret
+      width: parent.width
+      password: true
+      placeholderText: "nsec, ncryptsec or recovery phrase"
+      foreground: root.foreground
+      onAccepted: importButton.clicked()
+    }
+    TextField {
+      id: secretPass
+      width: parent.width
+      visible: secret.text.trim().indexOf("ncryptsec1") === 0
+      password: true
+      placeholderText: "Password of that ncryptsec"
+      foreground: root.foreground
+      onAccepted: importButton.clicked()
+    }
+    Row {
+      spacing: Style.space(8)
+      Button {
+        id: importButton
+        text: root.busy ? "Setting up…" : "Use this key"
+        iconText: "󰌆"
+        iconSpinning: root.busy
+        bordered: true
+        foreground: root.foreground
+        onClicked: {
+          if (secret.text.trim() === "") { root.error = "Paste your key first."; return }
+          var p = { secret: secret.text.trim() }
+          if (secretPass.visible) p.password = secretPass.text
+          root.start("setup.import", p)
+        }
+      }
+      Button {
+        text: "Back"
+        foreground: root.foreground
+        onClicked: { root.mode = ""; root.error = ""; secret.text = ""; secretPass.text = "" }
+      }
     }
   }
 
