@@ -1,0 +1,6 @@
+  // Peridot: private links in the Share menu (added by Peridot's install.sh)
+  "trigger.share.peridot": {"icon":"󰌷","label":"Private link","description":"Encrypted link via Peridot","when":"test -S \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/peridot.sock\""},
+  "trigger.share.peridot.file": {"icon":"","label":"File","action":"peridot share --pick --notify"},
+  "trigger.share.peridot.clipboard": {"icon":"","label":"Clipboard","action":"peridot share --clipboard --notify"},
+  "trigger.share.peridot.screenshot": {"icon":"󰹑","label":"Last screenshot","action":"peridot share --screenshot --notify"},
+  "trigger.share.peridot.manage": {"icon":"󰓦","label":"Manage links","action":"omarchy-shell derekross.peridot open"},

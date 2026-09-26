@@ -54,6 +54,12 @@ elif [[ -e $PLUGIN_PATH ]]; then
 fi
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 
+MENU="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+if [[ -f $MENU ]] && grep -q '"trigger.share.peridot' "$MENU"; then
+  echo "Removing Private link from the Share menu"
+  sed -i '/Peridot: private links in the Share menu/d; /"trigger\.share\.peridot/d' "$MENU"
+fi
+
 if (( PURGE )); then
   echo "Deleting the identity, history and backups"
   secret-tool clear application peridot 2>/dev/null || true

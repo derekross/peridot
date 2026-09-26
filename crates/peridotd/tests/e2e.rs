@@ -32,14 +32,23 @@ impl Daemon {
     /// `opal` is the control socket of an Opal daemon (real or fake).
     async fn start_with(relay: &str, name: &str, opal: Option<&Path>) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(&home).unwrap();
         let config = dir.path().join("config.toml");
         std::fs::write(
             &config,
             format!("relays = [\"{relay}\"]\ndevice_name = \"{name}\"\n"),
         )
         .unwrap();
+        Self::start_in(dir, config, opal).await
+    }
+
+    /// Start from a config file already written into `dir`.
+    async fn start_configured(dir: tempfile::TempDir, config: PathBuf) -> Self {
+        Self::start_in(dir, config, None).await
+    }
+
+    async fn start_in(dir: tempfile::TempDir, config: PathBuf, opal: Option<&Path>) -> Self {
+        let home = dir.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
         let socket = dir.path().join("peridot.sock");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_peridotd"));
         cmd.args(["--memory-keyring", "--socket"]).arg(&socket);
@@ -395,7 +404,8 @@ impl FakeOpal {
                                     serde_json::from_value(p["event"].clone()).unwrap();
                                 assert_eq!(p["app"], json!("peridot"));
                                 assert!(
-                                    [30078u16, 5, 21078, 22242].contains(&unsigned.kind.as_u16()),
+                                    [30078u16, 5, 21078, 22242, 24242]
+                                        .contains(&unsigned.kind.as_u16()),
                                     "kind {}",
                                     unsigned.kind
                                 );
@@ -609,4 +619,200 @@ async fn importing_the_same_key_rejoins_its_settings() {
     .await;
     b.call("apply", json!({})).await;
     assert_eq!(b.read(".config/kitty/kitty.conf").unwrap(), "font_size 13");
+}
+
+/// A stand-in Blossom server: PUT /upload stores the body under its hash
+/// (after checking the signed authorization header), GET /<sha> returns
+/// it, DELETE /<sha> removes it.
+struct FakeBlossom {
+    base: String,
+    blobs: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+}
+
+impl FakeBlossom {
+    async fn start() -> Self {
+        use nostr_sdk::prelude::*;
+        use sha2::Digest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let blobs = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            String,
+            Vec<u8>,
+        >::new()));
+        let store = blobs.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                let store = store.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let (head_end, headers) = loop {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            break (i + 4, String::from_utf8_lossy(&buf[..i]).to_string());
+                        }
+                    };
+                    let mut lines = headers.lines();
+                    let request = lines.next().unwrap_or("").to_string();
+                    let mut len = 0usize;
+                    let mut auth = None;
+                    for l in lines {
+                        if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
+                            len = v.trim().parse().unwrap_or(0);
+                        }
+                        if let Some((k, v)) = l.split_once(':')
+                            && k.eq_ignore_ascii_case("authorization")
+                        {
+                            auth = Some(v.trim().to_string());
+                        }
+                    }
+                    while buf.len() < head_end + len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    let body = buf[head_end..(head_end + len).min(buf.len())].to_vec();
+                    let mut parts = request.split(' ');
+                    let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+                    let auth_ok = |verb: &str, sha: &str| -> bool {
+                        let Some(a) = auth.as_ref().and_then(|a| a.strip_prefix("Nostr ")) else {
+                            return false;
+                        };
+                        let Ok(json) =
+                            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, a)
+                        else {
+                            return false;
+                        };
+                        let Ok(ev) = Event::from_json(&json) else {
+                            return false;
+                        };
+                        ev.verify().is_ok()
+                            && ev.kind.as_u16() == 24242
+                            && ev.tags.iter().any(|t| t.as_slice() == ["t", verb])
+                            && ev.tags.iter().any(|t| t.as_slice() == ["x", sha])
+                    };
+                    let (status, resp_body) = match (method, path) {
+                        ("PUT", "/upload") => {
+                            let sha = hex::encode(sha2::Sha256::digest(&body));
+                            if !auth_ok("upload", &sha) {
+                                ("401 Unauthorized", String::new())
+                            } else {
+                                store.lock().unwrap().insert(sha.clone(), body);
+                                ("200 OK", format!("{{\"sha256\":\"{sha}\",\"size\":{len}}}"))
+                            }
+                        }
+                        ("GET", p) => {
+                            let found = store
+                                .lock()
+                                .unwrap()
+                                .get(p.trim_start_matches('/'))
+                                .cloned();
+                            match found {
+                                Some(b) => {
+                                    let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", b.len()).into_bytes();
+                                    r.extend_from_slice(&b);
+                                    let _ = tokio::io::AsyncWriteExt::write_all(&mut s, &r).await;
+                                    return;
+                                }
+                                None => ("404 Not Found", String::new()),
+                            }
+                        }
+                        ("DELETE", p) => {
+                            let sha = p.trim_start_matches('/').to_string();
+                            if !auth_ok("delete", &sha) {
+                                ("401 Unauthorized", String::new())
+                            } else {
+                                store.lock().unwrap().remove(&sha);
+                                ("200 OK", String::new())
+                            }
+                        }
+                        _ => ("404 Not Found", String::new()),
+                    };
+                    let r = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{resp_body}",
+                        resp_body.len()
+                    );
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut s, r.as_bytes()).await;
+                });
+            }
+        });
+        Self { base, blobs }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn private_links_upload_open_and_revoke() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let blossom = FakeBlossom::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "relays = [\"{url}\"]\ndevice_name = \"Desk\"\n[share]\nservers = [\"{}\"]\nviewer = \"https://myperidot.app/s\"\nexpire_days = 3\n",
+            blossom.base
+        ),
+    )
+    .unwrap();
+    let d = Daemon::start_configured(dir, config).await;
+    d.call("setup.start_fresh", json!(null)).await;
+    until(&d, 20, "set up", |s| s["set_up"] == json!(true)).await;
+
+    // Share a file: the blob on the server is not the file, and the link
+    // (with its key) opens it.
+    d.write("Pictures/shot.png", "PNG data that is not really a PNG");
+    let share = d
+        .call(
+            "share.file",
+            json!({"path": d.home.join("Pictures/shot.png")}),
+        )
+        .await;
+    let link_url = share["url"].as_str().unwrap().to_string();
+    assert!(
+        link_url.starts_with("https://myperidot.app/s#1."),
+        "{link_url}"
+    );
+    let link = peridot_sync::share::Link::parse(&link_url).unwrap();
+    let stored = blossom
+        .blobs
+        .lock()
+        .unwrap()
+        .get(&link.sha256)
+        .cloned()
+        .unwrap();
+    assert!(!stored.windows(8).any(|w| w == b"PNG data"));
+    let (header, data) = peridot_sync::share::open(&link.key, &stored).unwrap();
+    assert_eq!(header.name, "shot.png");
+    assert_eq!(header.mime, "image/png");
+    assert_eq!(data, b"PNG data that is not really a PNG");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires = share["expires"].as_u64().unwrap();
+    assert!(expires > now + 2 * 86400 && expires <= now + 3 * 86400 + 5);
+
+    // Clipboard text works the same way; the panel lists both.
+    d.call("share.text", json!({"text": "hello from the clipboard"}))
+        .await;
+    let s = d.status().await;
+    assert_eq!(s["shares"].as_array().unwrap().len(), 2);
+
+    // Revoking removes the blob from the server.
+    let id = share["id"].as_i64().unwrap();
+    d.call("share.revoke", json!({"id": id})).await;
+    assert!(blossom.blobs.lock().unwrap().get(&link.sha256).is_none());
+    let s = d.status().await;
+    assert_eq!(s["shares"].as_array().unwrap().len(), 1);
 }

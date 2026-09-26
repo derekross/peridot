@@ -157,6 +157,95 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"restored": restored}))
         }
 
+        // ── Private links ──────────────────────────────────────────────
+        "share.file" => {
+            // A file on this computer, by absolute path (the CLI and the
+            // Share menu resolve relative ones).
+            #[derive(Deserialize)]
+            struct P {
+                path: String,
+                #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                expire_days: Option<u32>,
+            }
+            let p: P = parse(params)?;
+            let path = std::path::Path::new(&p.path);
+            anyhow::ensure!(path.is_absolute(), "give the file's full path");
+            let meta = tokio::fs::metadata(path)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}: {e}", p.path))?;
+            anyhow::ensure!(meta.is_file(), "{} isn't a file", p.path);
+            anyhow::ensure!(
+                meta.len() as usize <= peridot_sync::share::MAX_SHARE_BYTES,
+                "that file is too big to share (64 MB at most)"
+            );
+            let data = tokio::fs::read(path).await?;
+            let name = p.name.unwrap_or_else(|| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".into())
+            });
+            let mime = peridot_sync::share::mime_for(&name);
+            let days = p
+                .expire_days
+                .unwrap_or(app.config.read().await.share.expire_days)
+                .clamp(1, 365);
+            let share = app
+                .sharer()
+                .await?
+                .share(
+                    &name,
+                    mime,
+                    &data,
+                    Duration::from_secs(u64::from(days) * 86400),
+                )
+                .await?;
+            app.emit_state().await;
+            Ok(json!(share))
+        }
+        "share.text" => {
+            // Clipboard text and the like (small: it travels over the socket).
+            #[derive(Deserialize)]
+            struct P {
+                text: String,
+                #[serde(default)]
+                name: Option<String>,
+                #[serde(default)]
+                expire_days: Option<u32>,
+            }
+            let p: P = parse(params)?;
+            anyhow::ensure!(!p.text.trim().is_empty(), "nothing to share");
+            let name = p.name.unwrap_or_else(|| "clipboard.txt".into());
+            let days = p
+                .expire_days
+                .unwrap_or(app.config.read().await.share.expire_days)
+                .clamp(1, 365);
+            let share = app
+                .sharer()
+                .await?
+                .share(
+                    &name,
+                    "text/plain",
+                    p.text.as_bytes(),
+                    Duration::from_secs(u64::from(days) * 86400),
+                )
+                .await?;
+            app.emit_state().await;
+            Ok(json!(share))
+        }
+        "share.list" => Ok(json!(app.sharer().await?.store.list()?)),
+        "share.revoke" => {
+            #[derive(Deserialize)]
+            struct P {
+                id: i64,
+            }
+            let p: P = parse(params)?;
+            app.sharer().await?.revoke(p.id).await?;
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+
         // ── Servers ────────────────────────────────────────────────────
         "relays.set" => {
             #[derive(Deserialize)]

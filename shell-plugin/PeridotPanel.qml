@@ -29,6 +29,7 @@ Item {
   }
   readonly property var tabs: [
     { value: "changes", label: up && svc.attention > 0 ? "Changes " + svc.attention : "Changes" },
+    { value: "shares", label: "Links" },
     { value: "computers", label: "Computers" },
     { value: "settings", label: "Settings" }
   ]
@@ -192,6 +193,14 @@ Item {
         ChangesView {
           width: parent.width
           visible: root.up && root.svc.setUp && root.tab === "changes"
+          svc: root.svc
+          foreground: root.foreground
+          urgent: root.urgent
+        }
+
+        SharesView {
+          width: parent.width
+          visible: root.up && root.svc.setUp && root.tab === "shares"
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent

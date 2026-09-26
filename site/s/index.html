@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src blob:; media-src blob:; frame-src blob:; connect-src https:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Shared with Peridot</title>
+<link rel="stylesheet" href="viewer.css">
+</head>
+<body>
+<main>
+  <header>
+    <span class="gem" aria-hidden="true">◆</span>
+    <span class="brand">Peridot</span>
+  </header>
+  <section id="status" class="card">
+    <p id="message">Opening…</p>
+  </section>
+  <section id="file" class="card" hidden>
+    <h1 id="name"></h1>
+    <p class="meta"><span id="size"></span> · decrypted in your browser · <a id="download" download>Download</a></p>
+    <div id="view"></div>
+  </section>
+  <footer>
+    <p>This file was encrypted on the sender's computer. The key is in the link after the <code>#</code>, which your browser never sends to any server. <a href="https://myperidot.app/">What's Peridot?</a></p>
+  </footer>
+</main>
+<script src="viewer.js"></script>
+</body>
+</html>

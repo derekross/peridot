@@ -19,6 +19,9 @@ notify = "8"
 opal-core.workspace = true
 opal-kit.workspace = true
 peridot-sync = { path = "../peridot-sync" }
+base64 = "0.23.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json"] }
+rusqlite = "0.40.2"
 rustix = { version = "1.1.5", features = ["process", "system"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -31,3 +34,5 @@ zeroize = { version = "1.9.0", features = ["serde"] }
 [dev-dependencies]
 nostr-sdk = { version = "0.45", features = ["local-relay"] }
 tempfile = "3"
+sha2 = "0.10.9"
+hex = "0.4.3"

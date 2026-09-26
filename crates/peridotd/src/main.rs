@@ -8,6 +8,7 @@ mod notify;
 mod opal;
 mod pair;
 mod runner;
+mod share;
 
 use std::path::PathBuf;
 

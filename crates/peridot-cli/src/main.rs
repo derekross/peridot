@@ -71,6 +71,33 @@ enum Cmd {
     /// Stop publishing changes from this computer.
     Pause,
     Resume,
+    /// Share a file as a private link (encrypted; the link holds the key).
+    Share {
+        /// Files to share. Without any: the clipboard, the last screenshot,
+        /// or a file chooser (--clipboard / --screenshot / --pick).
+        paths: Vec<PathBuf>,
+        /// Share what's on the clipboard (text or an image).
+        #[arg(long)]
+        clipboard: bool,
+        /// Share the most recent screenshot.
+        #[arg(long)]
+        screenshot: bool,
+        /// Choose files with the desktop file chooser.
+        #[arg(long)]
+        pick: bool,
+        /// How many days the link works (default from settings, 7).
+        #[arg(long)]
+        days: Option<u32>,
+        /// Show a desktop notification instead of printing (for menus).
+        #[arg(long)]
+        notify: bool,
+    },
+    /// Your private links.
+    Shares,
+    /// Remove a private link and its file from the server.
+    Unshare {
+        id: i64,
+    },
     /// Your computers.
     Devices,
     /// The servers your encrypted settings are stored on.
@@ -276,6 +303,200 @@ async fn run() -> Result<()> {
                 "Your settings now sync from this computer. Add another with `peridot pair` on it."
             );
             println!("Tip: `peridot recovery` makes a recovery kit.");
+        }
+        Cmd::Share {
+            paths,
+            clipboard,
+            screenshot,
+            pick,
+            days,
+            notify,
+        } => {
+            let mut targets: Vec<(String, Option<PathBuf>)> = Vec::new(); // (name, path) or text
+            let mut text: Option<String> = None;
+            if clipboard {
+                let types = String::from_utf8_lossy(
+                    &std::process::Command::new("wl-paste")
+                        .arg("--list-types")
+                        .output()?
+                        .stdout,
+                )
+                .to_string();
+                if let Some(t) = types.lines().find(|t| t.starts_with("image/")) {
+                    let out = std::process::Command::new("wl-paste")
+                        .args(["--type", t])
+                        .output()?;
+                    anyhow::ensure!(!out.stdout.is_empty(), "the clipboard is empty");
+                    let ext = t
+                        .split('/')
+                        .nth(1)
+                        .unwrap_or("png")
+                        .split('+')
+                        .next()
+                        .unwrap_or("png");
+                    let dir = share_tmp_dir()?;
+                    let path = dir.join(format!("clipboard-{}.{ext}", now_secs()));
+                    std::fs::write(&path, &out.stdout)?;
+                    targets.push((
+                        path.file_name().unwrap().to_string_lossy().into_owned(),
+                        Some(path),
+                    ));
+                } else {
+                    let out = std::process::Command::new("wl-paste")
+                        .arg("--no-newline")
+                        .output()?;
+                    let t = String::from_utf8_lossy(&out.stdout).to_string();
+                    anyhow::ensure!(!t.trim().is_empty(), "the clipboard is empty");
+                    text = Some(t);
+                }
+            } else if screenshot {
+                let path = last_screenshot().ok_or_else(|| anyhow!("no screenshot found"))?;
+                targets.push((
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    Some(path),
+                ));
+            } else if pick || paths.is_empty() {
+                let out = std::process::Command::new("omarchy-file-select")
+                    .args(["--title", "Share as a private link", "--multiple"])
+                    .output()?;
+                if !out.status.success() && out.status.code().unwrap_or(1) > 1 {
+                    bail!("the file chooser did not open");
+                }
+                for line in String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                {
+                    let p = PathBuf::from(line.trim());
+                    targets.push((
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        Some(p),
+                    ));
+                }
+                if targets.is_empty() {
+                    return Ok(());
+                }
+            } else {
+                for p in paths {
+                    let p =
+                        std::fs::canonicalize(&p).with_context(|| format!("{}", p.display()))?;
+                    targets.push((
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        Some(p),
+                    ));
+                }
+            }
+
+            let mut links = Vec::new();
+            let result: Result<()> = async {
+                if let Some(t) = text {
+                    let s = c
+                        .call("share.text", json!({"text": t, "expire_days": days}))
+                        .await?;
+                    links.push((
+                        s["name"].as_str().unwrap_or("clipboard").to_string(),
+                        s["url"].as_str().unwrap_or("").to_string(),
+                    ));
+                }
+                for (name, path) in targets {
+                    let s = c
+                        .call(
+                            "share.file",
+                            json!({"path": path.unwrap(), "name": name, "expire_days": days}),
+                        )
+                        .await?;
+                    links.push((
+                        s["name"].as_str().unwrap_or("").to_string(),
+                        s["url"].as_str().unwrap_or("").to_string(),
+                    ));
+                }
+                Ok(())
+            }
+            .await;
+            if let Err(e) = result {
+                if notify {
+                    let _ = std::process::Command::new("omarchy-notification-send")
+                        .args([
+                            "--app-name",
+                            "Peridot",
+                            "-g",
+                            "󰓦",
+                            "-u",
+                            "critical",
+                            "Couldn't share",
+                            &e.to_string(),
+                        ])
+                        .status();
+                }
+                return Err(e);
+            }
+            let all: Vec<String> = links.iter().map(|(_, u)| u.clone()).collect();
+            let _ = std::process::Command::new("wl-copy")
+                .arg("--")
+                .arg(all.join("\n"))
+                .status();
+            if notify {
+                let body = if links.len() == 1 {
+                    format!("{} · link copied to the clipboard", links[0].0)
+                } else {
+                    format!("{} links copied to the clipboard", links.len())
+                };
+                let _ = std::process::Command::new("omarchy-notification-send")
+                    .args([
+                        "--app-name",
+                        "Peridot",
+                        "-g",
+                        "󰓦",
+                        "-t",
+                        "8000",
+                        "Private link ready",
+                        &body,
+                    ])
+                    .status();
+            } else {
+                for (name, url) in &links {
+                    println!("{name}\n  {url}");
+                }
+                println!(
+                    "Copied to the clipboard. Anyone with the link can open it until it expires; `peridot unshare` removes it sooner."
+                );
+            }
+        }
+        Cmd::Shares => {
+            let s = c.call("share.list", json!(null)).await?;
+            let now = now_secs();
+            for sh in s
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["revoked"] != json!(true))
+            {
+                let exp = sh["expires"].as_u64().unwrap_or(0);
+                let left = if exp > now {
+                    format!(
+                        "{}d {}h left",
+                        (exp - now) / 86400,
+                        ((exp - now) % 86400) / 3600
+                    )
+                } else {
+                    "expired".into()
+                };
+                println!(
+                    "{:>4}  {:<32} {:>9}  {}\n      {}",
+                    sh["id"],
+                    sh["name"].as_str().unwrap_or(""),
+                    human(sh["size"].as_u64().unwrap_or(0)),
+                    left,
+                    sh["url"].as_str().unwrap_or("")
+                );
+            }
+        }
+        Cmd::Unshare { id } => {
+            c.call("share.revoke", json!({"id": id})).await?;
+            println!("Removed. The link no longer opens.");
         }
         Cmd::Relays { cmd } => {
             let s = c.call("status", json!(null)).await?;
@@ -494,6 +715,68 @@ async fn run() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn human(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", n as f64 / 1048576.0)
+    }
+}
+
+/// Clipboard images go here before upload (inside home: the service can't
+/// see /tmp).
+fn share_tmp_dir() -> Result<PathBuf> {
+    let dir = dirs_cache().join("share");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+fn dirs_cache() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache")
+        })
+        .join("peridot")
+}
+
+/// The newest image in the screenshot folder Omarchy uses.
+fn last_screenshot() -> Option<PathBuf> {
+    let dir = std::env::var_os("OMARCHY_SCREENSHOT_DIR")
+        .or_else(|| std::env::var_os("XDG_PICTURES_DIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Pictures")
+        });
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for e in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = e.path();
+        let ext = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !["png", "jpg", "jpeg", "webp"].contains(&ext.as_str()) {
+            continue;
+        }
+        let Ok(m) = e.metadata() else { continue };
+        let Ok(t) = m.modified() else { continue };
+        if best.as_ref().is_none_or(|(bt, _)| t > *bt) {
+            best = Some((t, p));
+        }
+    }
+    best.map(|(_, p)| p)
 }
 
 fn print_status(s: &Value) {

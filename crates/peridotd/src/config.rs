@@ -14,6 +14,31 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
 ];
 
+/// Private share links.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShareConfig {
+    /// Blossom servers to upload to, tried in order.
+    pub servers: Vec<String>,
+    /// How long a link works (days), unless you remove it sooner.
+    pub expire_days: u32,
+    /// The viewer page links point at.
+    pub viewer: String,
+}
+
+impl Default for ShareConfig {
+    fn default() -> Self {
+        Self {
+            servers: vec![
+                "https://blossom.band".into(),
+                "https://blossom.primal.net".into(),
+            ],
+            expire_days: 7,
+            viewer: "https://myperidot.app/s".into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -28,6 +53,7 @@ pub struct Config {
     pub auto_apply: bool,
     /// Pause syncing.
     pub paused: bool,
+    pub share: ShareConfig,
 }
 
 impl Default for Config {
@@ -38,6 +64,7 @@ impl Default for Config {
             device_name: None,
             auto_apply: false,
             paused: false,
+            share: ShareConfig::default(),
         }
     }
 }

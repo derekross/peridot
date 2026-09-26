@@ -43,6 +43,7 @@ pub struct App {
     pub opal: crate::opal::OpalClient,
     pub events: broadcast::Sender<IpcEvent>,
     pub engine: RwLock<Option<Arc<SyncEngine>>>,
+    pub sharer: RwLock<Option<Arc<crate::share::Sharer>>>,
     pub runner: Mutex<Option<JoinHandle<()>>>,
     pub pairing: Mutex<Option<PairSession>>,
     /// Wakes the runner for an immediate sync.
@@ -64,6 +65,7 @@ impl App {
             opal: crate::opal::OpalClient::new(&o.opal_socket),
             events,
             engine: RwLock::new(None),
+            sharer: RwLock::new(None),
             runner: Mutex::new(None),
             pairing: Mutex::new(None),
             nudge: Notify::new(),
@@ -82,6 +84,14 @@ impl App {
 
     pub async fn engine(&self) -> anyhow::Result<Arc<SyncEngine>> {
         self.engine
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Peridot isn't set up on this computer yet"))
+    }
+
+    pub async fn sharer(&self) -> anyhow::Result<Arc<crate::share::Sharer>> {
+        self.sharer
             .read()
             .await
             .clone()
@@ -138,6 +148,15 @@ impl App {
             old.abort();
         }
         *self.engine.write().await = Some(engine.clone());
+        // Share links sign with the same identity.
+        let sharer = Arc::new(crate::share::Sharer::new(
+            crate::share::ShareStore::new(self.db.clone())?,
+            engine.signer(),
+            cfg.share.servers.clone(),
+            cfg.share.viewer.clone(),
+        )?);
+        *self.sharer.write().await = Some(sharer.clone());
+        crate::share::spawn_sweeper(sharer);
         let handle = crate::runner::spawn(self.clone(), engine, fresh);
         *self.runner.lock().await = Some(handle);
         self.emit_state().await;
@@ -153,6 +172,7 @@ impl App {
         if let Some(engine) = self.engine.write().await.take() {
             engine.client().shutdown().await;
         }
+        self.sharer.write().await.take();
         Identity::forget(&self.secrets).await?;
         self.clear_sync_state()?;
         self.emit_state().await;
@@ -263,6 +283,18 @@ impl App {
                 .collect::<Vec<_>>()
         );
         v["history"] = json!(history);
+        v["shares"] = json!(
+            self.sharer
+                .read()
+                .await
+                .as_ref()
+                .and_then(|s| s.store.list().ok())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|s| !s.revoked)
+                .collect::<Vec<_>>()
+        );
+        v["share_expire_days"] = json!(cfg.share.expire_days);
         v["waiting_to_send"] = json!(overview.waiting_to_send);
         v["last_sync"] = json!(self.last_sync.load(Ordering::Relaxed));
         v["choices"] = json!(cfg.sync);

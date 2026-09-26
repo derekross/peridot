@@ -144,6 +144,36 @@ if command -v omarchy >/dev/null; then
     || omarchy plugin enable "$PLUGIN_ID" --section right >/dev/null 2>&1 || true
 fi
 
+# Share menu entries. The menu file is JSONC with comments, so the entries
+# are inserted as text before the closing brace, once.
+MENU="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"
+if [[ -f $MENU ]] && ! grep -q '"trigger.share.peridot"' "$MENU"; then
+  echo "Adding Private link to the Share menu"
+  cp "$MENU" "$MENU.bak.peridot"
+  python3 - "$MENU" dist/omarchy-menu.jsonc <<'PY'
+import sys
+menu, snippet = sys.argv[1], sys.argv[2]
+text = open(menu).read()
+entries = open(snippet).read()
+end = text.rstrip().rfind("}")
+if end < 0:
+    sys.exit("menu file has no closing brace")
+# A trailing comma is fine in JSONC; add one if the last entry lacks it.
+head = text[:end].rstrip()
+if head.endswith("{"):
+    body = head + "\n"
+elif head.endswith(","):
+    body = head + "\n"
+else:
+    body = head + ",\n"
+open(menu, "w").write(body + entries + text[end:])
+PY
+elif [[ ! -f $MENU ]]; then
+  echo "Adding Private link to the Share menu"
+  mkdir -p "$(dirname "$MENU")"
+  { echo "{"; cat dist/omarchy-menu.jsonc; echo "}"; } >"$MENU"
+fi
+
 echo
 systemctl --user --no-pager --lines=0 status peridot.service | head -3
 echo

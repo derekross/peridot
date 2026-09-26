@@ -165,6 +165,10 @@ impl SyncEngine {
         &self.identity
     }
 
+    pub fn signer(&self) -> Arc<dyn crate::signer::IdentitySigner> {
+        self.signer.clone()
+    }
+
     pub fn client(&self) -> &Client {
         &self.client
     }
