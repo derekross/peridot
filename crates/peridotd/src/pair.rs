@@ -107,6 +107,9 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
         ..Default::default()
     }));
     let (client, relays) = pairing_client(app).await;
+    // Listen before anything goes out: the channel only carries what arrives
+    // after it's opened, and the other computer answers within a second.
+    let mut notifications = client.notifications();
     subscribe(&client, &relays, joiner.filter()).await?;
 
     let task_view = view.clone();
@@ -114,7 +117,6 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
     let task = tokio::spawn(async move {
         let app = task_app;
         let view = task_view;
-        let mut notifications = client.notifications();
         let deadline = tokio::time::sleep(Duration::from_secs(CODE_LIFETIME));
         tokio::pin!(deadline);
         loop {
@@ -160,7 +162,7 @@ pub async fn start_new(app: &Arc<App>) -> anyhow::Result<PairView> {
                         }
                         Err(PairError::Expired) => break,
                         // Noise or an impostor: keep waiting.
-                        Err(e) => tracing::debug!("pairing: {e}"),
+                        Err(e) => tracing::warn!("pairing: ignored a message: {e}"),
                     }
                 }
                 _ = &mut deadline => break,
@@ -200,6 +202,11 @@ pub async fn start_existing(app: &Arc<App>, code: &str) -> anyhow::Result<PairVi
         ..Default::default()
     }));
     let (client, relays) = pairing_client(app).await;
+    // Listen before the hello goes out. Publishing waits on every relay
+    // (one down, one wanting auth, and it takes seconds), while the new
+    // computer replies within a second of hearing us: a channel opened
+    // after the send would miss the reply and this side would wait forever.
+    let mut notifications = client.notifications();
     subscribe(&client, &relays, sponsor.filter()).await?;
     send(&client, &relays, &hello).await?;
     let (confirm_tx, mut confirm_rx) = oneshot::channel::<bool>();
@@ -209,7 +216,6 @@ pub async fn start_existing(app: &Arc<App>, code: &str) -> anyhow::Result<PairVi
     let task = tokio::spawn(async move {
         let app = task_app;
         let view = task_view;
-        let mut notifications = client.notifications();
         let deadline = tokio::time::sleep(Duration::from_secs(CODE_LIFETIME));
         tokio::pin!(deadline);
         let mut waiting_for_confirm = false;
@@ -232,7 +238,7 @@ pub async fn start_existing(app: &Arc<App>, code: &str) -> anyhow::Result<PairVi
                             app.nudge.notify_one();
                             break;
                         }
-                        Err(e) => tracing::debug!("pairing: {e}"),
+                        Err(e) => tracing::warn!("pairing: ignored a message: {e}"),
                     }
                 }
                 ok = &mut confirm_rx, if waiting_for_confirm => {
