@@ -95,7 +95,7 @@ pub fn open(key: &[u8; 32], blob: &[u8]) -> anyhow::Result<(Header, Vec<u8>)> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
     pub sha256: String,
-    /// Blossom server host, e.g. `blossom.band`.
+    /// Blossom server host, e.g. `nostr.download`.
     pub server: String,
     pub key: [u8; 32],
 }
@@ -238,7 +238,7 @@ mod tests {
         let s = seal("a b/../c.txt", "", b"x").unwrap();
         let link = Link {
             sha256: s.sha256.clone(),
-            server: "blossom.band".into(),
+            server: "nostr.download".into(),
             key: *s.key,
         };
         let url = link.to_url("https://myperidot.app/s/");
@@ -246,13 +246,13 @@ mod tests {
         assert_eq!(Link::parse(&url).unwrap(), link);
         assert_eq!(
             link.blob_url(),
-            format!("https://blossom.band/{}", s.sha256)
+            format!("https://nostr.download/{}", s.sha256)
         );
         assert!(Link::parse("https://myperidot.app/s#2.abc.x.y").is_err());
         assert!(Link::parse("https://myperidot.app/s").is_err());
         assert!(valid_host("127.0.0.1:4433") && !valid_host("host:port") && !valid_host("nodots"));
         assert_eq!(scheme_for("127.0.0.1:4433"), "http");
-        assert_eq!(scheme_for("blossom.band"), "https");
+        assert_eq!(scheme_for("nostr.download"), "https");
         let (h, _) = open(&s.key, &s.blob).unwrap();
         assert_eq!(h.name, "a b..c.txt");
         assert_eq!(h.mime, "application/octet-stream");

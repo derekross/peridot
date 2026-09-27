@@ -288,6 +288,11 @@ impl Sharer {
             .get("x-reason")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
+        if status.as_u16() == 415 {
+            // Media hosts check for a picture or a video; an encrypted blob
+            // is neither.
+            anyhow::bail!("{server} only takes pictures and videos, so it can't hold a private link");
+        }
         if !status.is_success() {
             anyhow::bail!(
                 "{server} refused the upload ({status}{})",

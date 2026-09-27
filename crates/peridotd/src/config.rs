@@ -14,6 +14,21 @@ pub const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
 ];
 
+/// Where private links are kept. A link's blob is encrypted, so the server
+/// has to accept arbitrary bytes: media hosts that check for a picture or a
+/// video (blossom.band, blossom.primal.net) answer 415. These four take
+/// anything, serve it cross-origin to the viewer, and honour removal.
+pub const DEFAULT_SHARE_SERVERS: &[&str] = &[
+    "https://nostr.download",
+    "https://blossom.yakihonne.com",
+    "https://files.sovbit.host",
+    "https://cdn.hzrd149.com",
+];
+
+/// Servers Peridot used to list by default that refuse encrypted blobs.
+/// Dropped from a saved list, so an older config doesn't keep failing.
+const MEDIA_ONLY_SERVERS: &[&str] = &["blossom.band", "blossom.primal.net"];
+
 /// Private share links.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,10 +44,7 @@ pub struct ShareConfig {
 impl Default for ShareConfig {
     fn default() -> Self {
         Self {
-            servers: vec![
-                "https://blossom.band".into(),
-                "https://blossom.primal.net".into(),
-            ],
+            servers: DEFAULT_SHARE_SERVERS.iter().map(|s| s.to_string()).collect(),
             expire_days: 7,
             viewer: "https://myperidot.app/s".into(),
         }
@@ -71,11 +83,22 @@ impl Default for Config {
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        match std::fs::read_to_string(path) {
-            Ok(text) => Ok(toml::from_str(&text)?),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
-            Err(e) => Err(e.into()),
+        let mut cfg: Self = match std::fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) => return Err(e.into()),
+        };
+        cfg.share.servers.retain(|s| {
+            let host = s
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/');
+            !MEDIA_ONLY_SERVERS.contains(&host)
+        });
+        if cfg.share.servers.is_empty() {
+            cfg.share.servers = ShareConfig::default().servers;
         }
+        Ok(cfg)
     }
 
     /// Written privately and atomically.
@@ -139,5 +162,28 @@ mod tests {
             0o600
         );
         assert!(!Config::default().device_name().is_empty());
+    }
+
+    #[test]
+    fn drops_media_only_share_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("peridot/config.toml");
+        let mut c = Config::default();
+        c.share.servers = vec![
+            "https://blossom.band".into(),
+            "https://blossom.primal.net/".into(),
+            "https://example.org".into(),
+        ];
+        c.save(&path).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().share.servers,
+            vec!["https://example.org".to_string()]
+        );
+        c.share.servers = vec!["https://blossom.band".into()];
+        c.save(&path).unwrap();
+        assert_eq!(
+            Config::load(&path).unwrap().share.servers,
+            ShareConfig::default().servers
+        );
     }
 }
