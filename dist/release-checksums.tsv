@@ -1,0 +1,7 @@
+# Release tarballs the installer may use, pinned here so the reviewed commit vouches
+# for the exact bytes: sha256, asset, the source commit its build attestation names, size in bytes.
+# Added with dist/pin-release.sh after each release; do not edit by hand.
+5b1008a4834798984e2d6a686d7c611c7249656178086893b8024e9187cd1308	peridot-v0.1.0-x86_64-linux.tar.gz	db9f4781da29eade713ab05c3a7661f56e3addd7	11254360
+2142a38c3729bf76f46f49fc9936d347aa188fe28ec0a123208a72b50926512e	peridot-v0.1.0-aarch64-linux.tar.gz	db9f4781da29eade713ab05c3a7661f56e3addd7	10830181
+9b39a4e88a9afca131ddb7735edaae676b704cedd2e29b57d2b895b3f1bfe8f5	peridot-v0.1.1-x86_64-linux.tar.gz	944b56b277ec99c3fd34af2a7d4d46401bf33797	11255871
+a5630a0fa2e49d0d3f8eddf2dbeb6a979f9280bc44445b1afb0c96ee8c6972fe	peridot-v0.1.1-aarch64-linux.tar.gz	944b56b277ec99c3fd34af2a7d4d46401bf33797	10835168

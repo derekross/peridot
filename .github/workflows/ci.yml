@@ -23,3 +23,5 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --workspace --tests -- -D warnings
       - run: cargo test --locked --workspace
+      - run: ./dist/gen-known-hashes.sh --check
+      - run: tests/install/run.sh

@@ -1,0 +1,47 @@
+# Installed by Peridot (https://github.com/derekross/peridot); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
+[Unit]
+Description=Peridot: keeps your Omarchy computers matching
+Documentation=https://github.com/derekross/peridot
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/peridotd
+Restart=on-failure
+RestartSec=3
+
+# Hardening. Peridot writes the settings it syncs (in ~/.config, and
+# ~/.XCompose / ~/.bashrc if you sync them), so your home folder stays
+# writable; the rest of the system is read-only. It needs the session bus
+# (keyring) and the network; installing a theme or plugin you accepted runs
+# through systemd-run, outside this sandbox.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h %t
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+# Not RestrictSUIDSGID: systemd can't inspect openat2's mode (it lives in a
+# struct), so that option blocks openat2 entirely, and Peridot relies on it
+# to open files safely beneath your home. Peridot strips setuid/setgid bits
+# from everything it writes instead.
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+# Your key lives in this process: never write core dumps.
+LimitCORE=0
+UMask=0022
+
+[Install]
+WantedBy=graphical-session.target

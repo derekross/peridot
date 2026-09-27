@@ -33,6 +33,7 @@ Off until you turn them on, because they can run commands: apps that start at lo
 - **Private links** use AES-256-GCM with a one-time key. The encrypted blob (name and type included) is stored on a [Blossom](https://github.com/hzrd149/blossom) server under its hash; the server sees neither. The viewer checks the hash before decrypting, and lives under a strict content security policy. Anyone with the link can open the file until it expires or you remove it, so treat links like the file itself.
 - **Your key** is kept in the login keyring. On Omarchy that keyring opens with your session, so Peridot is as safe as your login and your disk encryption. That's the same as your browser's saved passwords. Peridot never shows or asks for it; the recovery kit carries it encrypted with your six words.
 - **A hardened service**: no core dumps, a seccomp filter, and a read-only system. It writes only in your home folder. Installing a theme or plugin you accepted runs Omarchy's own installer, outside the service.
+- **The installer only touches what it can prove it wrote.** Every file `install.sh` writes is recorded with its SHA-256 in `~/.local/state/peridot/installed.tsv`, and `dist/known-hashes.tsv` lists every file each Peridot version has installed. A path is replaced or removed only while it is a regular file (never a link or a folder) whose hash matches one of those, and every replacement checks the bytes it swapped out, after the swap. Everything else stays and is named in the output; a binary or unit that isn't Peridot's stops the install before anything is written. Binaries from before Peridot kept records are replaced only with your consent and a backup Peridot never deletes. Omarchy's Share menu file is edited only with your consent, with a backup, and only Peridot's own unchanged lines are ever taken out again. `tests/install/` exercises all of this against a sandboxed home in CI.
 
 What Peridot can't protect against: someone who can run code as you on one of your computers can read your settings and push changes to your others. Removing a computer hides it from your list but can't wipe what it already has.
 
@@ -52,7 +53,11 @@ omarchy plugin add https://github.com/derekross/peridot.git --enable
 
 Or from a clone: `git clone https://github.com/derekross/peridot.git && cd peridot && ./dist/install.sh`.
 
-`install.sh` puts `peridotd` and `peridot` in `~/.local/bin`, enables the `peridot.service` user service and adds the Peridot icon to the bar. Nothing syncs until you choose how to start in the panel.
+`install.sh` puts `peridotd` and `peridot` in `~/.local/bin`, enables the `peridot.service` user service and adds the Peridot icon to the bar. It asks before adding Private link entries to Omarchy's Share menu (`~/.config/omarchy/extensions/omarchy-menu.jsonc`; pass `--menu` to say yes from a script; the previous file is kept as a backup). Nothing syncs until you choose how to start in the panel.
+
+It records what it writes in `~/.local/state/peridot/installed.tsv` (path and SHA-256), checks every path before it changes anything, and prints what it keeps. If `~/.local/bin/peridotd` or `peridot` already exists without a record (a 0.1.x install), it asks before replacing it; for a non-interactive run pass `--replace-existing=<path>` for each. The old file is moved to `~/.local/state/peridot/backup/` and never deleted.
+
+**Binaries.** With Rust installed, `install.sh` builds from source. Without it, it downloads the release matching the plugin's version from [GitHub Releases](https://github.com/derekross/peridot/releases), built by GitHub Actions from its tag. The download is accepted only if it matches the hash and size pinned in the checkout (`dist/release-checksums.tsv`, added after each release once its build attestation was verified, with the source commit the attestation names), and is bounded to that size and to sane connect, total and stall limits; when the GitHub CLI is signed in the attestation is verified again. A checkout without a pin for its version refuses the download and says so. Choose explicitly with `install.sh --build` or `install.sh --prebuilt`.
 
 ## Update
 
@@ -61,6 +66,8 @@ omarchy plugin update derekross.peridot
 ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh
 ```
 
+Updating keeps your identity and settings. The unit and plugin files from any earlier version are recognised by their release hashes and replaced; a file you edited stays, the output says so, and Peridot's version of it isn't installed. The service is enabled on first install only; an update restarts it if it is running Peridot's binary, and never re-enables one you disabled.
+
 ## Remove
 
 ```sh
@@ -68,7 +75,7 @@ omarchy plugin update derekross.peridot
 omarchy plugin remove derekross.peridot                          # if added with omarchy plugin add
 ```
 
-This stops and removes the service, the binaries and the plugin. Your settings files stay as they are, and your other computers keep syncing. This computer's Peridot identity is kept so it can rejoin; `uninstall.sh --purge` deletes it too (make a recovery kit first if this is your only computer).
+This stops and removes the service, the binaries and the plugin, but only what it can verify Peridot wrote: a unit or plugin file you edited stays (a changed unit is stopped, not disabled, and the script tells you what to do), a masked or linked unit is left alone, folders keep anything you added, and only Share menu lines that are still exactly Peridot's are taken out. Your settings files stay as they are, and your other computers keep syncing. This computer's Peridot identity is kept so it can rejoin; `uninstall.sh --purge` deletes it too, with its history and undo backups (`$XDG_DATA_HOME/peridot`, `$XDG_CONFIG_HOME/peridot`, `$XDG_CACHE_HOME/peridot`), after you type a confirmation, and reports whether the keyring items were actually cleared. Make a recovery kit first if this is your only computer. Backups in `~/.local/state/peridot/backup/` are never deleted, not even by `--purge`.
 
 ## Use
 
@@ -122,6 +129,7 @@ dist                 systemd unit, install and uninstall scripts
 
 ```sh
 cargo test                                       # unit tests + two-computer end-to-end tests
+tests/install/run.sh                             # install/uninstall against a sandboxed home
 cargo run -p peridotd --example dev_relay        # a local relay for trying things out
 peridotd --memory-keyring --home /tmp/h --socket /tmp/p.sock --config /tmp/p.toml --db /tmp/p.db
 ```
