@@ -21,6 +21,10 @@ struct Computer {
 
 impl Computer {
     async fn new(identity: &Identity, relay: &RelayUrl, name: &str) -> Self {
+        Self::with_relays(identity, vec![relay.clone()], name).await
+    }
+
+    async fn with_relays(identity: &Identity, relays: Vec<RelayUrl>, name: &str) -> Self {
         let home = tempfile::tempdir().unwrap();
         let data = tempfile::tempdir().unwrap();
         let db = Db::open_in_memory().unwrap();
@@ -32,7 +36,7 @@ impl Computer {
             home: Home::open(home.path()).unwrap(),
             manifest: Manifest::new(Choices::default()),
             client: Client::default(),
-            relays: vec![relay.clone()],
+            relays,
             backups_dir: data.path().join("backups"),
             device_name: name.into(),
             version: "test".into(),
@@ -315,4 +319,155 @@ async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
     );
     laptop.announce().await.unwrap();
     assert_eq!(laptop.store.state("theme").unwrap(), None);
+}
+
+/// Everything of ours on one relay: d → created_at.
+async fn on_relay(relay: &RelayUrl, id: &Identity) -> std::collections::BTreeMap<String, u64> {
+    let client = Client::default();
+    client.add_relay(relay).await.unwrap();
+    client.connect().and_wait(Duration::from_secs(3)).await;
+    let filter = Filter::new()
+        .author(id.pubkey())
+        .kind(Kind::Custom(peridot_sync::DATA_KIND));
+    let events = client
+        .fetch_events(vec![(relay.clone(), vec![filter])])
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let out = events
+        .iter()
+        .filter_map(|e| Some((e.tags.identifier()?, e.created_at.as_secs())))
+        .collect();
+    client.shutdown().await;
+    out
+}
+
+async fn deletions_on(relay: &RelayUrl, id: &Identity) -> Vec<Event> {
+    let client = Client::default();
+    client.add_relay(relay).await.unwrap();
+    client.connect().and_wait(Duration::from_secs(3)).await;
+    let filter = Filter::new().author(id.pubkey()).kind(Kind::Custom(5));
+    let events = client
+        .fetch_events(vec![(relay.clone(), vec![filter])])
+        .timeout(Duration::from_secs(5))
+        .await
+        .unwrap();
+    let out = events.iter().cloned().collect();
+    client.shutdown().await;
+    out
+}
+
+#[tokio::test]
+async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
+    let r1 = mock_relay().await;
+    let r2 = mock_relay().await;
+    let (u1, u2) = (r1.url().await, r2.url().await);
+    let id = Identity::generate();
+    let now = Timestamp::now().as_secs();
+
+    // The desk only knows the first server. A big file (chunks), a small
+    // one, its device entry and the root go there.
+    let desk = Computer::new(&id, &u1, "Desk").await;
+    let big = vec![b'x'; 50 * 1024];
+    desk.write(BINDINGS, &big);
+    desk.write(".config/kitty/kitty.conf", b"font_size 13");
+    desk.engine.publish_root().await.unwrap();
+    desk.engine.announce().await.unwrap();
+    desk.engine.publish_changes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let before = on_relay(&u1, &id).await;
+    // 2 files, their chunks, state entries, the device and the root.
+    assert!(before.len() >= 7, "{before:?}");
+    let chunks = before.len() - 6;
+    assert!(on_relay(&u2, &id).await.is_empty());
+
+    // The laptop uses both servers: its audit notices the second has
+    // nothing and sends everything there.
+    let laptop = Computer::with_relays(&id, vec![u1.clone(), u2.clone()], "Laptop").await;
+    laptop.engine.announce().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let report = laptop.engine.audit(now).await.unwrap();
+    assert_eq!(report.relays.len(), 2);
+    assert!(report.relays.iter().all(|r| r.reachable));
+    assert_eq!(report.relays[0].missing, 0, "{report:?}");
+    assert!(report.relays[1].missing >= before.len(), "{report:?}");
+    assert!(report.resent >= before.len(), "{report:?}");
+    assert_eq!(report.refreshed, 0);
+    assert_eq!(report.stale_chunks, 0);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let second = on_relay(&u2, &id).await;
+    assert!(
+        second.len() > before.len(),
+        "both device entries and everything else: {second:?}"
+    );
+    assert!(laptop.engine.audited_at() >= now);
+    // A computer that only knows the second server now gets everything.
+    let spare = Computer::new(&id, &u2, "Spare").await;
+    assert_eq!(spare.status(BINDINGS).await, Some(FileStatus::Incoming));
+    let applied = spare.engine.apply(&[]).await.unwrap();
+    assert!(applied.failed.is_empty(), "{applied:?}");
+    assert_eq!(spare.read(BINDINGS).unwrap(), big);
+
+    // Nothing to do when everything is everywhere and recent.
+    let report = laptop.engine.audit(now + 60).await.unwrap();
+    assert_eq!((report.resent, report.refreshed), (0, 0), "{report:?}");
+
+    // A month later, everything is published again with fresh dates.
+    let old = on_relay(&u1, &id).await;
+    let report = laptop
+        .engine
+        .audit(now + peridot_sync::sync::REFRESH_AFTER + 60)
+        .await
+        .unwrap();
+    assert!(report.refreshed >= 6, "{report:?}");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let fresh = on_relay(&u1, &id).await;
+    for (d, at) in &old {
+        assert!(fresh[d] > *at || d.len() == 32, "{d} wasn't refreshed");
+    }
+    assert_eq!(
+        laptop.status(BINDINGS).await,
+        Some(FileStatus::Incoming),
+        "a refresh changes no status"
+    );
+
+    // The desk shrinks the big file: its chunks are orphaned. They're left
+    // alone for a week, then found, then removed on request.
+    desk.write(BINDINGS, b"small now");
+    desk.sync().await;
+    desk.engine.publish_changes().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let report = desk.engine.audit(now + 3600).await.unwrap();
+    assert_eq!(report.stale_chunks, 0, "too soon: {report:?}");
+    let report = desk
+        .engine
+        .audit(now + peridot_sync::sync::CHUNK_GRACE + 3600)
+        .await
+        .unwrap();
+    assert_eq!(report.stale_chunks, chunks, "{report:?}");
+    let signer = desk.engine.signer();
+    let removed = desk
+        .engine
+        .remove_chunks(signer.as_ref(), &report.stale)
+        .await
+        .unwrap();
+    assert_eq!(removed, chunks);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let dels = deletions_on(&u1, &id).await;
+    assert_eq!(dels.len(), 1);
+    let coords: Vec<String> = dels[0]
+        .tags
+        .iter()
+        .filter(|t| t.kind() == "a")
+        .filter_map(|t| t.content().map(String::from))
+        .collect();
+    assert_eq!(coords.len(), chunks);
+    assert!(
+        coords
+            .iter()
+            .all(|c| c.starts_with(&format!("30078:{}:", id.pubkey().to_hex())))
+    );
+    assert!(dels[0].tags.iter().any(|t| t.as_slice() == ["k", "30078"]));
+    let after = desk.engine.last_audit().await.unwrap();
+    assert_eq!((after.stale_chunks, after.removed_chunks), (0, chunks));
 }

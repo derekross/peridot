@@ -184,6 +184,9 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<RelaysCmd>,
     },
+    /// Check your sync servers now: send again what any of them lacks,
+    /// refresh what's getting old, and drop old chunks nothing refers to.
+    Tidy,
     /// Remove a computer from your list.
     RemoveDevice {
         id: String,
@@ -592,6 +595,27 @@ async fn run() -> Result<()> {
                 );
             }
         }
+        Cmd::Tidy => {
+            println!("Checking your sync servers…");
+            let r = c.call("servers.audit", json!(null)).await?;
+            for h in r["relays"].as_array().into_iter().flatten() {
+                println!(
+                    "  {}: {}",
+                    h["url"].as_str().unwrap_or(""),
+                    if h["reachable"] != json!(true) {
+                        "unreachable".to_string()
+                    } else if h["missing"].as_u64().unwrap_or(0) > 0 {
+                        format!("was missing {} item(s), sent again", h["missing"])
+                    } else {
+                        format!("complete ({} items)", h["items"])
+                    }
+                );
+            }
+            println!(
+                "{} item(s) sent again, {} refreshed, {} old chunk(s) removed.",
+                r["resent"], r["refreshed"], r["removed_chunks"]
+            );
+        }
         Cmd::Send { id, to } => {
             let r = c.call("share.send", json!({"id": id, "to": to})).await?;
             println!(
@@ -854,8 +878,36 @@ async fn run() -> Result<()> {
                 .collect();
             match cmd {
                 None => {
+                    let health = s["servers"]["relays"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
                     for r in &relays {
-                        println!("{r}");
+                        let h = health
+                            .iter()
+                            .find(|h| h["url"].as_str() == Some(r.as_str()));
+                        let note = match h {
+                            None => String::new(),
+                            Some(h) if h["reachable"] != json!(true) => {
+                                "  · unreachable at the last check".into()
+                            }
+                            Some(h) if h["missing"].as_u64().unwrap_or(0) > 0 => {
+                                format!("  · was missing {} item(s), sent again", h["missing"])
+                            }
+                            Some(h) => format!("  · complete ({} items)", h["items"]),
+                        };
+                        println!("{r}{note}");
+                    }
+                    if let Some(at) = s["servers"]["at"].as_u64() {
+                        let mins = now_secs().saturating_sub(at) / 60;
+                        println!(
+                            "Last checked {}. `peridot tidy` checks now.",
+                            if mins < 60 {
+                                format!("{mins} min ago")
+                            } else {
+                                format!("{} h ago", mins / 60)
+                            }
+                        );
                     }
                 }
                 Some(RelaysCmd::Add { url }) => {

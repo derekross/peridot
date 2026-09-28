@@ -2,6 +2,7 @@
 //! computers agreed on, the newest version from elsewhere, pieces of big
 //! files, your devices, Omarchy state and the undo history.
 
+use nostr_sdk::prelude::Timestamp;
 use opal_core::db::Db;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,9 @@ pub enum FileStatus {
 }
 
 /// The newest version of a file from any of your computers.
+/// How long an unreferenced chunk is kept locally before it's pruned.
+const CHUNK_SETTLE: u64 = 3600;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Remote {
     pub entry: FileEntry,
@@ -240,7 +244,9 @@ impl SyncStore {
             })
     }
 
-    /// Drop pieces no current file refers to.
+    /// Drop pieces no current file refers to. Recent ones are kept: a
+    /// file's pieces arrive seconds before (or after) the entry that
+    /// refers to them, in no fixed order.
     pub fn prune_chunks(&self) -> opal_core::Result<usize> {
         let mut keep = std::collections::HashSet::new();
         for path in self.remote_paths()? {
@@ -248,9 +254,10 @@ impl SyncStore {
                 keep.extend(r.entry.chunks);
             }
         }
+        let cutoff = (Timestamp::now().as_secs().saturating_sub(CHUNK_SETTLE)) as i64;
         let all: Vec<String> = self.db.with(|c| {
-            let mut st = c.prepare("SELECT sha FROM chunks")?;
-            st.query_map([], |r| r.get(0))?.collect()
+            let mut st = c.prepare("SELECT sha FROM chunks WHERE created_at < ?1")?;
+            st.query_map([cutoff], |r| r.get(0))?.collect()
         })?;
         let mut removed = 0;
         for sha in all.into_iter().filter(|s| !keep.contains(s)) {

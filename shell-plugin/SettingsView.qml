@@ -24,6 +24,7 @@ Column {
   property bool checkingRelay: false
   property string relayError: ""
   property string confirmRelayRemove: ""
+  property bool tidying: false
 
   function addRelay() {
     var url = newRelay.text.trim().replace(/\/+$/, "")
@@ -158,15 +159,40 @@ Column {
       required property var modelData
       width: root.width
       spacing: Style.space(8)
-      Text {
-        textFormat: Text.PlainText
+      // What the daily check found for this server.
+      readonly property var health: {
+        var list = root.svc && root.svc.status.servers ? (root.svc.status.servers.relays || []) : []
+        for (var i = 0; i < list.length; i++) if (list[i].url === modelData) return list[i]
+        return null
+      }
+      Column {
         width: parent.width - relayRemove.width - Style.space(8)
         anchors.verticalCenter: parent.verticalCenter
-        elide: Text.ElideMiddle
-        color: root.foreground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        text: modelData
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          elide: Text.ElideMiddle
+          color: root.foreground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          text: modelData
+        }
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: !!parent.parent.health
+          elide: Text.ElideRight
+          color: parent.parent.health && (!parent.parent.health.reachable || parent.parent.health.missing > 0) ? root.urgent : root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          text: {
+            var h = parent.parent.health
+            if (!h) return ""
+            if (!h.reachable) return "Couldn't be reached at the last check"
+            if (h.missing > 0) return "Was missing " + h.missing + " item(s); sent again"
+            return "Complete · " + h.items + " items"
+          }
+        }
       }
       PanelActionButton {
         id: relayRemove
@@ -174,6 +200,39 @@ Column {
         hoverColor: root.urgent
         tooltipText: root.confirmRelayRemove === modelData ? "Click again to remove" : "Remove"
         onClicked: root.removeRelay(modelData)
+      }
+    }
+  }
+  Row {
+    spacing: Style.space(8)
+    visible: !!root.svc && !!root.svc.status.servers
+    Text {
+      textFormat: Text.PlainText
+      anchors.verticalCenter: parent.verticalCenter
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      text: {
+        var a = root.svc && root.svc.status.servers ? root.svc.status.servers : null
+        if (!a) return ""
+        var s = "Checked " + U.ago(a.at, root.svc.now)
+        if (a.stale_chunks > 0) s += " · " + a.stale_chunks + " old piece(s) to remove"
+        return s
+      }
+    }
+    Button {
+      text: root.tidying ? "Checking…" : "Check now"
+      iconText: "󰓦"
+      iconSpinning: root.tidying
+      enabled: !root.tidying
+      foreground: root.foreground
+      onClicked: {
+        root.tidying = true
+        root.svc.call("servers.audit", null, function(err, r) {
+          root.tidying = false
+          if (err) root.svc.message(err, true)
+          else root.svc.message("Servers checked: " + r.resent + " sent again, " + r.refreshed + " refreshed, " + r.removed_chunks + " old piece(s) removed", false)
+        })
       }
     }
   }

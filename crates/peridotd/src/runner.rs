@@ -23,6 +23,9 @@ const DEBOUNCE: Duration = Duration::from_secs(3);
 const FLUSH_EVERY: Duration = Duration::from_secs(60);
 const CATCH_UP_EVERY: Duration = Duration::from_secs(15 * 60);
 const HEARTBEAT_EVERY: Duration = Duration::from_secs(24 * 3600);
+/// The servers are checked this often (and at startup when it's been
+/// longer).
+const AUDIT_EVERY: u64 = 24 * 3600;
 const SUB_ID: &str = "peridot";
 
 pub fn spawn(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> JoinHandle<()> {
@@ -69,6 +72,13 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
     app.mark_synced();
     app.emit_state().await;
     let mut waiting = incoming(&engine).await;
+    if Timestamp::now()
+        .as_secs()
+        .saturating_sub(engine.audited_at())
+        > AUDIT_EVERY
+    {
+        audit(&app, &engine).await;
+    }
 
     let mut notifications = engine.client().notifications();
     let since = Timestamp::now().as_secs().saturating_sub(60);
@@ -162,11 +172,38 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             }
             _ = heartbeat.tick() => {
                 let _ = engine.announce().await;
+                audit(&app, &engine).await;
             }
         }
     }
     drop(watcher);
     Ok(())
+}
+
+/// Check the servers: fill gaps, refresh old items, and (when the key is
+/// here, so nobody is asked) drop chunks nothing refers to. With Opal
+/// holding the key, deletions wait for you: `peridot tidy`, or the panel.
+async fn audit(app: &Arc<App>, engine: &Arc<SyncEngine>) {
+    match engine.audit(Timestamp::now().as_secs()).await {
+        Ok(report) => {
+            if report.resent + report.refreshed > 0 {
+                tracing::info!(
+                    "servers checked: {} sent again, {} refreshed",
+                    report.resent,
+                    report.refreshed
+                );
+            }
+            if !report.stale.is_empty() && engine.identity().keys.is_some() {
+                let signer = engine.signer();
+                match engine.remove_chunks(signer.as_ref(), &report.stale).await {
+                    Ok(n) => tracing::info!("asked the servers to drop {n} old chunk(s)"),
+                    Err(e) => tracing::info!("old chunks stay for now: {e}"),
+                }
+            }
+        }
+        Err(e) => tracing::info!("couldn't check the servers: {e}"),
+    }
+    app.emit_state().await;
 }
 
 /// The root event and this device's entry, until both have gone out.

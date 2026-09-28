@@ -434,6 +434,7 @@ impl App {
             None => json!({"enabled": false}),
         };
         v["waiting_to_send"] = json!(overview.waiting_to_send);
+        v["servers"] = json!(engine.last_audit().await);
         v["last_sync"] = json!(self.last_sync.load(Ordering::Relaxed));
         v["choices"] = json!(cfg.sync);
         v

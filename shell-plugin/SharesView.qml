@@ -36,7 +36,7 @@ Column {
 
   onVisibleChanged: if (!visible) { confirmRemove = ""; sendingId = "" }
 
-  function left(expires) {
+  function timeLeft(expires) {
     var s = expires - Math.floor((svc ? svc.now : Date.now()) / 1000)
     if (s <= 0) return "expired"
     if (s < 3600) return Math.max(1, Math.floor(s / 60)) + "m left"
@@ -148,7 +148,7 @@ Column {
             color: root.dim
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
-            text: root.human(share.modelData.size) + " · " + root.left(share.modelData.expires) + " · " + share.modelData.server
+            text: root.human(share.modelData.size) + " · " + root.timeLeft(share.modelData.expires) + " · " + share.modelData.server
           }
         }
         Row {

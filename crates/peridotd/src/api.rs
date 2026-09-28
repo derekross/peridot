@@ -614,6 +614,26 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // ── Servers ────────────────────────────────────────────────────
+        "servers.audit" => {
+            // Check every server now, and tidy up: with Opal holding the
+            // key this is where deletions get their prompt.
+            let engine = app.engine().await?;
+            let mut report = engine.audit(Timestamp::now().as_secs()).await?;
+            if !report.stale.is_empty() {
+                let signer = app.sharer().await?.signer.clone();
+                let stale = report.stale.clone();
+                match engine.remove_chunks(signer.as_ref(), &stale).await {
+                    Ok(n) => report.removed_chunks += n,
+                    Err(e) => {
+                        app.emit_state().await;
+                        return Err(gallery_err(anyhow::anyhow!("{e}"))
+                            .context("the check is done, but the old chunks couldn't be removed"));
+                    }
+                }
+            }
+            app.emit_state().await;
+            Ok(json!(report))
+        }
         "relays.set" => {
             #[derive(Deserialize)]
             struct P {

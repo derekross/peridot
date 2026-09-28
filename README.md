@@ -28,7 +28,7 @@ Off until you turn them on, because they can run commands: apps that start at lo
 ## Security
 
 - **End-to-end encrypted.** Each setting is encrypted on your computer (NIP-44, with a key only your computers share) before it's sent. The servers see opaque blobs: not file names, not contents.
-- **Several independent servers** store the encrypted blobs, so none of them going away loses anything, and you can add your own.
+- **Several independent servers** store the encrypted blobs, so none of them going away loses anything, and you can add your own. Once a day Peridot checks each server for everything of yours: whatever one lacks is sent again, anything older than 30 days is published again (some servers let old events lapse), and chunk events nothing refers to any more are removed after a week's grace (NIP-09). The Settings tab shows each server's standing; `peridot tidy` checks now.
 - **Pairing can't be hijacked by someone who saw the code:** both screens show a number derived from the code and each computer's one-time key. A go-between would make them differ, and nothing is shared until you confirm they match.
 - **Applying is careful.** Paths are checked against what Peridot syncs, then opened by the kernel beneath your home folder with symlinks refused (`openat2`), written atomically, and never made executable. A computer can't send a file outside the sync list, even one that's otherwise valid.
 - **Private links** use AES-256-GCM with a one-time key. The encrypted blob (name and type included) is stored on a [Blossom](https://github.com/hzrd149/blossom) server under its hash; the server sees neither. The viewer checks the hash before decrypting, and lives under a strict content security policy. Anyone with the link can open the file until it expires or you remove it, so treat links like the file itself.
@@ -103,6 +103,7 @@ peridot install <repo url> / install-setup <address>
 peridot publish-setup "My desk" [--summary …] [--screenshot pic.png]
 peridot follow <who> [--undo] / name "Derek"      # the name others see
 peridot relays / relays add wss://… / relays remove …
+peridot tidy                  # check the servers now, refresh, remove old pieces
 peridot start --opal / --import / --fresh
 peridot opal pair             # pair with Opal again (after revoking it there)
 peridot pause / resume / sync / devices / leave
@@ -115,6 +116,7 @@ Peridot is a small service (`peridotd`) plus an Omarchy shell plugin. Under the 
 - Your computers share an identity (a Nostr key) and a separate 32-byte sync secret, created on your first computer and handed to others when you pair.
 - Each synced file is an encrypted NIP-78 application-data event (kind 30078) under an opaque, keyed name. Bigger files are split into chunks. Deletions are recorded too, and the newest version per file wins.
 - Each computer remembers the last version it agreed on, so it can tell "changed here", "changed elsewhere" and "changed in both" (a conflict) apart. It never publishes before it has heard from the servers, so a new computer can't push its defaults over your real settings.
+- A daily audit asks each relay for everything under your key, compares it with what should be there (every current file entry and its chunks, the state entries, every computer's entry and the root event), re-sends gaps, re-publishes items unseen for 30 days with a newer date, and collects chunk events no current entry references. With your key on the computer, the deletion request goes out on its own; with Opal holding the key, deletions are sensitive, so they wait for "Check now" or `peridot tidy`.
 - Pairing messages are ephemeral events (kind 21078) between one-time keys, found through a meeting point derived from the code.
 - The recovery kit is your key encrypted with NIP-49 (scrypt) under your six words. The sync secret is stored on the servers, encrypted to your key.
 - The Gallery is plain, public Nostr: a like is a kind 17 website reaction on the repository URL, a review a kind 1111 comment rooted at it (NIP-22/73, with a `rating` tag), a listing a kind 1985 label in the `omarchy` namespace, a setup an addressable kind 30490 event, following is your kind 3 follow list, and your name a kind 0 profile (created only if the key has none). Likes are weighed by trust: yours and your follows' count four, their follows' two, strangers' one. Nothing needs registering first: the repository URL is the identity, so any Nostr client can react to the same things.

@@ -3,7 +3,7 @@
 //! backs up what it replaces and can be undone). The daemon drives it:
 //! file watching, timers and the relay subscription live there.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,6 +30,15 @@ const CATCH_UP_MARGIN: u64 = 10 * 60;
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Backups kept for undo.
 const KEEP_BACKUPS: usize = 20;
+/// Items older than this on the servers are published again, so servers
+/// that let old events lapse keep yours.
+pub const REFRESH_AFTER: u64 = 30 * 86_400;
+/// Chunks nothing refers to any more are removed from the servers once
+/// they're this old (a computer may still be sending the entry that
+/// refers to them).
+pub const CHUNK_GRACE: u64 = 7 * 86_400;
+/// At most this many chunks in one deletion request.
+const DELETE_BATCH: usize = 100;
 
 pub struct SyncParams {
     pub identity: Identity,
@@ -61,6 +70,38 @@ pub struct SyncEngine {
     relays: RwLock<Vec<RelayUrl>>,
     backups_dir: PathBuf,
     last_created: AtomicU64,
+    last_audit: RwLock<Option<AuditReport>>,
+}
+
+/// One server's copy of your settings, as of the last audit.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RelayHealth {
+    pub url: String,
+    pub reachable: bool,
+    /// Current items it holds (of `expected`).
+    pub items: usize,
+    /// Current items it lacked (sent again).
+    pub missing: usize,
+}
+
+/// What the daily check of the servers found and did.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuditReport {
+    pub at: u64,
+    pub relays: Vec<RelayHealth>,
+    /// Current items: files, their chunks, state, computers, the root.
+    pub expected: usize,
+    /// Items published again because a server lacked them.
+    pub resent: usize,
+    /// Items published again because they were getting old everywhere.
+    pub refreshed: usize,
+    /// Chunk events nothing refers to any more, still on the servers.
+    pub stale_chunks: usize,
+    /// Of those, asked to be removed this time.
+    pub removed_chunks: usize,
+    /// The stale chunks' coordinates, for [`SyncEngine::remove_chunks`].
+    #[serde(skip)]
+    pub stale: Vec<String>,
 }
 
 /// A file as the panel shows it.
@@ -150,7 +191,234 @@ impl SyncEngine {
             relays: RwLock::new(p.relays),
             backups_dir: p.backups_dir,
             last_created: AtomicU64::new(0),
+            last_audit: RwLock::new(None),
         })
+    }
+
+    pub async fn last_audit(&self) -> Option<AuditReport> {
+        self.last_audit.read().await.clone()
+    }
+
+    /// When the servers were last audited (0 = never).
+    pub fn audited_at(&self) -> u64 {
+        self.store
+            .db()
+            .get_kv("peridot.audited_at")
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Everything that should be on every server right now, with the
+    /// newest `created_at` we know for it.
+    fn expected_items(&self) -> anyhow::Result<Vec<(Sealed, Item, u64)>> {
+        let mut out = Vec::new();
+        let mut chunks: BTreeMap<String, u64> = BTreeMap::new();
+        for path in self.store.remote_paths()? {
+            let Some(r) = self.store.remote(&path)? else {
+                continue;
+            };
+            if !r.entry.deleted {
+                for c in &r.entry.chunks {
+                    chunks.insert(c.clone(), r.created_at);
+                }
+            }
+            let item = Item::File(r.entry);
+            out.push((envelope::seal(&self.keys, &item)?, item, r.created_at));
+        }
+        for (sha, at) in chunks {
+            // A chunk we never received can't be sent again; the entry
+            // that needs it will show as unreadable until it turns up.
+            if let Some(c) = self.store.chunk(&sha) {
+                let item = Item::Chunk(c);
+                out.push((envelope::seal(&self.keys, &item)?, item, at));
+            }
+        }
+        for kind in ["theme", "themes", "plugins"] {
+            if let Some(s) = self.store.state(kind)? {
+                let at = self.store.state_created_at(kind);
+                let item = Item::State(s);
+                out.push((envelope::seal(&self.keys, &item)?, item, at));
+            }
+        }
+        for d in self.store.devices()? {
+            // Ours goes out daily anyway; the others' only need to exist.
+            let item = Item::Device(d);
+            out.push((envelope::seal(&self.keys, &item)?, item, u64::MAX));
+        }
+        Ok(out)
+    }
+
+    /// Check every server for everything of ours: send again what any of
+    /// them lacks, publish again what is getting old everywhere (so
+    /// servers that let old events lapse keep it), and find chunk events
+    /// nothing refers to any more. `now` is the clock (a parameter so tests
+    /// can move it). Chunks are only found here; [`Self::remove_chunks`]
+    /// asks the servers to drop them, because that needs a signature you
+    /// may want to be asked about.
+    pub async fn audit(&self, now: u64) -> anyhow::Result<AuditReport> {
+        let relays = self.relays.read().await.clone();
+        let expected = self.expected_items()?;
+        let root_d = Identity::root_name(&self.pubkey());
+        let mut report = AuditReport {
+            at: now,
+            expected: expected.len() + 1,
+            ..Default::default()
+        };
+        // d → newest created_at seen anywhere, and which relays have it.
+        let mut newest: BTreeMap<String, u64> = BTreeMap::new();
+        let mut holders: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Events under a d we don't expect: candidates for removal.
+        let mut unknown: BTreeMap<String, (Event, u64)> = BTreeMap::new();
+        let expected_ds: BTreeSet<&str> = expected.iter().map(|(s, ..)| s.d.as_str()).collect();
+        let mut reachable = 0;
+        for relay in &relays {
+            let fetched = self
+                .client
+                .fetch_events(vec![(relay.clone(), vec![self.filter(0)])])
+                .timeout(FETCH_TIMEOUT)
+                .await;
+            let mut health = RelayHealth {
+                url: relay.to_string(),
+                ..Default::default()
+            };
+            let Ok(events) = fetched else {
+                report.relays.push(health);
+                continue;
+            };
+            health.reachable = true;
+            reachable += 1;
+            let mut held = BTreeSet::new();
+            for ev in events.iter() {
+                let Some(d) = ev.tags.identifier() else {
+                    continue;
+                };
+                if ev.pubkey != self.pubkey() || ev.verify().is_err() {
+                    continue;
+                }
+                let at = ev.created_at.as_secs();
+                let e = newest.entry(d.clone()).or_insert(0);
+                *e = (*e).max(at);
+                holders
+                    .entry(d.clone())
+                    .or_default()
+                    .insert(relay.to_string());
+                if expected_ds.contains(d.as_str()) || d == root_d {
+                    held.insert(d.clone());
+                } else {
+                    let u = unknown.entry(d.clone()).or_insert((ev.clone(), 0));
+                    u.1 = u.1.max(at);
+                }
+                // A relay that was down during a catch-up may hold news.
+                self.ingest(ev);
+            }
+            health.items = held.len();
+            health.missing = expected
+                .iter()
+                .filter(|(s, ..)| !held.contains(&s.d))
+                .count()
+                + usize::from(!held.contains(&root_d));
+            report.relays.push(health);
+        }
+        if reachable == 0 {
+            anyhow::bail!("none of your sync servers could be reached");
+        }
+
+        // Send again what a server lacks; publish again what's getting old.
+        let mut again: Vec<(Sealed, u64)> = Vec::new();
+        for (sealed, item, known_at) in &expected {
+            let on = holders.get(&sealed.d).map(BTreeSet::len).unwrap_or(0);
+            let seen_at = newest
+                .get(&sealed.d)
+                .copied()
+                .unwrap_or(0)
+                .max(if *known_at == u64::MAX { 0 } else { *known_at });
+            if on < reachable {
+                again.push((envelope::seal(&self.keys, item)?, seen_at));
+                report.resent += 1;
+            } else if *known_at != u64::MAX && now.saturating_sub(seen_at) > REFRESH_AFTER {
+                again.push((envelope::seal(&self.keys, item)?, seen_at));
+                report.refreshed += 1;
+            }
+        }
+        for (sealed, after) in again {
+            self.queue(std::slice::from_ref(&sealed), after).await?;
+        }
+        let root_on = holders.get(&root_d).map(BTreeSet::len).unwrap_or(0);
+        let root_at = newest.get(&root_d).copied().unwrap_or(0);
+        if root_on < reachable || now.saturating_sub(root_at) > REFRESH_AFTER {
+            match self.publish_root().await {
+                Ok(()) => {
+                    if root_on < reachable {
+                        report.resent += 1;
+                    } else {
+                        report.refreshed += 1;
+                    }
+                }
+                Err(e) => tracing::info!("the root event wasn't refreshed: {e}"),
+            }
+        }
+        self.flush().await;
+
+        // Chunks nothing refers to: only ones old enough that no computer
+        // can still be in the middle of sending the entry for them.
+        let mut referenced = BTreeSet::new();
+        for path in self.store.remote_paths()? {
+            if let Some(r) = self.store.remote(&path)?
+                && !r.entry.deleted
+            {
+                referenced.extend(r.entry.chunks);
+            }
+        }
+        for (d, (ev, at)) in unknown {
+            if now.saturating_sub(at) <= CHUNK_GRACE {
+                continue;
+            }
+            if let Some(Item::Chunk(c)) = envelope::open(&self.keys, &d, &ev.content)
+                && !referenced.contains(&c.sha256)
+            {
+                report.stale_chunks += 1;
+                report
+                    .stale
+                    .push(format!("{DATA_KIND}:{}:{d}", self.pubkey().to_hex()));
+            }
+        }
+        let _ = self
+            .store
+            .db()
+            .set_kv("peridot.audited_at", &now.to_string());
+        *self.last_audit.write().await = Some(report.clone());
+        Ok(report)
+    }
+
+    /// Ask the servers to drop chunk events nothing refers to (NIP-09, by
+    /// coordinate). `signer` signs the request: yours may want to be
+    /// asked about deletions, so the caller chooses which one.
+    pub async fn remove_chunks(
+        &self,
+        signer: &dyn crate::signer::IdentitySigner,
+        coordinates: &[String],
+    ) -> anyhow::Result<usize> {
+        let mut removed = 0;
+        for batch in coordinates.chunks(DELETE_BATCH) {
+            let mut b = EventBuilder::new(Kind::Custom(5), "")
+                .tag(Tag::custom("k", [DATA_KIND.to_string()]));
+            for coord in batch {
+                b = b.tag(Tag::custom("a", [coord.as_str()]));
+            }
+            let unsigned = b.finalize_unsigned(self.pubkey());
+            let ev = sign_within(signer, unsigned, signer.sign_timeout()).await?;
+            self.outbox.push(&ev)?;
+            removed += batch.len();
+        }
+        self.flush().await;
+        if let Some(r) = self.last_audit.write().await.as_mut() {
+            r.removed_chunks += removed;
+            r.stale_chunks = r.stale_chunks.saturating_sub(removed);
+            r.stale.retain(|c| !coordinates.contains(c));
+        }
+        Ok(removed)
     }
 
     pub fn device_id(&self) -> &str {
