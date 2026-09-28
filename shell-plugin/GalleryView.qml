@@ -26,6 +26,22 @@ Column {
   property bool loading: false
   property var setups: []
   property var mine: null
+  // Candidates you switched off (by url), and whether the theme name goes in.
+  property var leftOut: ({})
+  property bool includeTheme: true
+  function candidateOn(c) { return !!c.url && !leftOut[c.url] }
+  function toggleCandidate(c) {
+    if (!c.url) return
+    var m = Object.assign({}, leftOut)
+    if (m[c.url]) delete m[c.url]; else m[c.url] = true
+    leftOut = m
+  }
+  readonly property int chosenCount: {
+    var n = 0
+    var list = mine && mine.candidates ? mine.candidates : []
+    for (var i = 0; i < list.length; i++) if (candidateOn(list[i])) n++
+    return n
+  }
 
   property string openReviews: ""
   property var reviews: []
@@ -219,6 +235,11 @@ Column {
       root.publishing = true
       var p = { title: t, summary: setupSummary.text.trim() }
       if (root.screenshotOn && root.mine && root.mine.screenshot) p.screenshot = root.mine.screenshot
+      var include = []
+      var list = root.mine && root.mine.candidates ? root.mine.candidates : []
+      for (var i = 0; i < list.length; i++) if (root.candidateOn(list[i])) include.push(list[i].url)
+      p.include = include
+      p.without_theme = !root.includeTheme
       svc.call("gallery.setup.publish", p, function(err) {
         root.publishing = false
         if (err) { root.svc.message(err, true); return }
@@ -626,12 +647,32 @@ Column {
         var m = root.mine
         if (!m) return "Looking at this computer…"
         if (!m.can_publish) return "Nothing to publish yet: install a theme or plugin from a repository first."
-        var parts = []
-        if (m.theme) parts.push("the " + m.theme + " theme")
-        var t = (m.themes || []).length, p = (m.plugins || []).length
-        if (t > 0) parts.push(t + " installed theme" + (t === 1 ? "" : "s"))
-        if (p > 0) parts.push(p + " plugin" + (p === 1 ? "" : "s"))
-        return "Share what this computer runs: " + parts.join(", ") + ". Others can install it in one go."
+        return "Share what this computer runs. Tick what goes in; others can install it in one go. Only repository addresses are shared, never files."
+      }
+    }
+    Toggle {
+      width: parent.width
+      visible: !!root.mine && root.mine.can_publish && !!root.mine.theme
+      label: "The " + (root.mine ? root.mine.theme : "") + " theme"
+      description: "The theme in use"
+      checked: root.includeTheme
+      foreground: root.foreground
+      onClicked: root.includeTheme = !root.includeTheme
+    }
+    Repeater {
+      model: root.mine && root.mine.can_publish ? (root.mine.candidates || []) : []
+      delegate: Toggle {
+        required property var modelData
+        width: parent ? parent.width : 0
+        enabled: !!modelData.url
+        label: modelData.title + (modelData.kind === "theme" ? " theme" : "")
+        description: !modelData.url ? "No public source, so it can't be shared"
+          : modelData.how === "linked" ? modelData.url + " · a linked checkout (one you develop?)"
+          : modelData.how === "catalogue" ? modelData.url + " · from the catalogue"
+          : modelData.url
+        checked: root.candidateOn(modelData)
+        foreground: root.foreground
+        onClicked: root.toggleCandidate(modelData)
       }
     }
     TextField {
@@ -660,7 +701,8 @@ Column {
     }
     Button {
       visible: !!root.mine && root.mine.can_publish
-      text: root.publishing ? "Publishing…" : "Publish"
+      text: root.publishing ? "Publishing…" : (root.chosenCount + (root.includeTheme && root.mine && root.mine.theme ? 1 : 0)) === 0 ? "Nothing chosen" : "Publish"
+      enabled: !root.publishing && (root.chosenCount + (root.includeTheme && root.mine && root.mine.theme ? 1 : 0)) > 0
       iconText: "󰐕"
       iconSpinning: root.publishing
       bordered: true

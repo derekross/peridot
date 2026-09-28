@@ -1130,6 +1130,47 @@ pub fn local_state(home: &std::path::Path, device: &str) -> Vec<StateEntry> {
     out
 }
 
+/// Something installed under `~/.config/omarchy/{themes,plugins}`: what
+/// it's called, where it came from if that can be told, and whether it's
+/// a link (a checkout you develop) rather than an install.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Installed {
+    pub name: String,
+    /// A public https repository, when the folder's git origin says so.
+    pub url: Option<String>,
+    pub linked: bool,
+}
+
+/// Every folder in `dir`, links included, with its origin when public.
+pub fn installed_in(dir: &std::path::Path) -> Vec<Installed> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Ok(meta) = e.path().symlink_metadata() else {
+            continue;
+        };
+        let linked = meta.file_type().is_symlink();
+        if !e.path().is_dir() {
+            continue;
+        }
+        let Ok(name) = e.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        let url = std::fs::read_to_string(e.path().join(".git/config"))
+            .ok()
+            .and_then(|c| origin_url(&c))
+            .and_then(|u| https_source(&u));
+        out.push(Installed { name, url, linked });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
 /// `name → https clone URL` for each git checkout in `dir` (links, e.g.
 /// plugins in development, are skipped).
 fn git_sources(dir: &std::path::Path) -> Vec<Source> {

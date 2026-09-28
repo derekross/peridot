@@ -1200,17 +1200,54 @@ async fn likes_reviews_and_setups_reach_other_users_ranked_by_trust() {
         ".config/omarchy/themes/rose-pine/.git/config",
         "[remote \"origin\"]\n\turl = https://github.com/rose/omarchy-rose-pine-theme.git\n",
     );
-    desk.write(
-        ".config/omarchy/plugins/calendar/.git/config",
+    // A linked checkout (one you develop) with a public origin, a folder
+    // with no git at all whose id the catalogue knows, and one it doesn't.
+    let dev = desk.home.join("dev-calendar");
+    std::fs::create_dir_all(dev.join(".git")).unwrap();
+    std::fs::write(
+        dev.join(".git/config"),
         "[remote \"origin\"]\n\turl = git@github.com:derekross/omarchy-calendar.git\n",
-    );
+    )
+    .unwrap();
+    std::fs::create_dir_all(desk.home.join(".config/omarchy/plugins")).unwrap();
+    std::os::unix::fs::symlink(&dev, desk.home.join(".config/omarchy/plugins/calendar")).unwrap();
+    desk.write(".config/omarchy/plugins/x.other/manifest.json", "{}");
+    desk.write(".config/omarchy/plugins/nobody.knows/manifest.json", "{}");
     let mine = desk.call("gallery.setup.mine", json!(null)).await;
     assert_eq!(mine["can_publish"], json!(true), "{mine}");
     assert_eq!(mine["theme"], json!("rose-pine"));
+    let cands = mine["candidates"].as_array().cloned().unwrap_or_default();
+    let how = |name: &str| {
+        cands
+            .iter()
+            .find(|c| c["name"] == json!(name))
+            .map(|c| {
+                (
+                    c["how"].as_str().unwrap_or("").to_string(),
+                    c["url"].clone(),
+                )
+            })
+            .unwrap_or_else(|| panic!("no candidate {name}: {mine}"))
+    };
+    assert_eq!(
+        how("rose-pine"),
+        (
+            "git".into(),
+            json!("https://github.com/rose/omarchy-rose-pine-theme")
+        )
+    );
+    assert_eq!(how("calendar"), ("linked".into(), json!(clock)));
+    assert_eq!(
+        how("x.other"),
+        ("catalogue".into(), json!("https://github.com/x/other"))
+    );
+    assert_eq!(how("nobody.knows"), ("unknown".into(), Value::Null));
+    // Publish with the catalogue one left out.
     let setup = desk
         .call(
             "gallery.setup.publish",
-            json!({"title": "Derek's desk", "summary": "Rose Pine and a clock"}),
+            json!({"title": "Derek's desk", "summary": "Rose Pine and a clock",
+                   "include": ["https://github.com/rose/omarchy-rose-pine-theme", format!("{clock}.git")]}),
         )
         .await;
     assert_eq!(
@@ -1218,6 +1255,20 @@ async fn likes_reviews_and_setups_reach_other_users_ranked_by_trust() {
         json!(["https://github.com/rose/omarchy-rose-pine-theme"])
     );
     assert_eq!(setup["plugins"], json!([clock]));
+    // Without a selection, everything with a source goes in.
+    let all = desk
+        .call(
+            "gallery.setup.publish",
+            json!({"title": "Everything", "without_theme": true}),
+        )
+        .await;
+    assert_eq!(all["plugins"].as_array().map(Vec::len), Some(2));
+    assert!(all["theme"].is_null());
+    desk.call(
+        "gallery.setup.remove",
+        json!({"coordinate": all["coordinate"]}),
+    )
+    .await;
     let coordinate = setup["coordinate"].as_str().unwrap().to_string();
 
     // The laptop sees all of it, by name.

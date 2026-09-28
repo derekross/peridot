@@ -62,6 +62,7 @@ struct PluginCatalog {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct PluginEntry {
+    id: String,
     name: String,
     description: String,
     author: String,
@@ -108,6 +109,7 @@ pub fn parse_plugins(json: &[u8]) -> anyhow::Result<Vec<Item>> {
             source: "plugins".into(),
             installable: p.install_available.unwrap_or(true),
             publisher: None,
+            catalog_id: Some(clean(&p.id, 100)).filter(|s| !s.is_empty()),
         });
     }
     dedup(&mut out);
@@ -165,6 +167,7 @@ pub fn parse_themes(json: &[u8]) -> anyhow::Result<Vec<Item>> {
             source: "themes".into(),
             installable: true,
             publisher: None,
+            catalog_id: None,
         });
     }
     dedup(&mut out);
@@ -248,6 +251,7 @@ mod tests {
             Some("https://plugins.omarchy.org/assets/img/plugins/x.webp")
         );
         assert!(items[0].installable && !items[1].installable);
+        assert_eq!(items[0].catalog_id.as_deref(), Some("a.b"));
 
         let themes = br#"[
           {"name":"Catppuccin","github_url":"https://github.com/basecamp/omarchy/tree/quattro/themes/catppuccin",

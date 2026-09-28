@@ -450,13 +450,17 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!(app.gallery().await?.setups(&p.query).await?))
         }
         "gallery.setup.mine" => {
+            // Everything that could go in, so the panel can offer a choice.
             let g = app.gallery().await?;
-            let spec = g.my_setup();
-            let can = spec.theme.is_some() || !spec.themes.is_empty() || !spec.plugins.is_empty();
-            let mut v = json!(spec);
-            v["can_publish"] = json!(can);
-            v["screenshot"] = json!(last_screenshot(&app.home));
-            Ok(v)
+            let candidates = g.setup_candidates();
+            let theme = g.my_setup().theme;
+            let can = theme.is_some() || candidates.iter().any(|c| c.url.is_some());
+            Ok(json!({
+                "theme": theme,
+                "candidates": candidates,
+                "can_publish": can,
+                "screenshot": last_screenshot(&app.home),
+            }))
         }
         "gallery.setup.publish" => {
             #[derive(Deserialize)]
@@ -468,10 +472,48 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 /// or nothing.
                 #[serde(default)]
                 screenshot: Option<String>,
+                /// Which of the candidates to include (their urls). Absent:
+                /// everything with a public source. Present: exactly these.
+                #[serde(default)]
+                include: Option<Vec<String>>,
+                /// Leave the current theme's name out.
+                #[serde(default)]
+                without_theme: bool,
             }
             let p: P = parse(params)?;
             let g = app.gallery().await?;
+            let candidates = g.setup_candidates();
+            let chosen: Vec<&crate::gallery::Candidate> = match &p.include {
+                None => candidates.iter().filter(|c| c.url.is_some()).collect(),
+                Some(urls) => {
+                    let want: Vec<String> = urls
+                        .iter()
+                        .filter_map(|u| peridot_sync::gallery::canonical_url(u))
+                        .collect();
+                    candidates
+                        .iter()
+                        .filter(|c| {
+                            c.url
+                                .as_deref()
+                                .is_some_and(|u| want.contains(&u.to_string()))
+                        })
+                        .collect()
+                }
+            };
             let mut spec = g.my_setup();
+            spec.themes = chosen
+                .iter()
+                .filter(|c| c.kind == ItemKind::Theme)
+                .filter_map(|c| c.url.clone())
+                .collect();
+            spec.plugins = chosen
+                .iter()
+                .filter(|c| c.kind == ItemKind::Plugin)
+                .filter_map(|c| c.url.clone())
+                .collect();
+            if p.without_theme {
+                spec.theme = None;
+            }
             spec.title = p.title;
             spec.summary = p.summary;
             if let Some(path) = p.screenshot.filter(|s| !s.trim().is_empty()) {

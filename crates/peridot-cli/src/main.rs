@@ -165,6 +165,15 @@ enum Cmd {
         /// Attach this picture (uploaded for everyone to see).
         #[arg(long)]
         screenshot: Option<PathBuf>,
+        /// Leave one out (a folder name or repository address); repeatable.
+        #[arg(long = "without")]
+        without: Vec<String>,
+        /// Don't name the theme in use.
+        #[arg(long)]
+        no_theme: bool,
+        /// Only show what would be published.
+        #[arg(long)]
+        preview: bool,
     },
     /// Install someone's setup (its address from `peridot gallery --setups`).
     InstallSetup {
@@ -792,6 +801,9 @@ async fn run() -> Result<()> {
             title,
             summary,
             screenshot,
+            without,
+            no_theme,
+            preview,
         } => {
             let screenshot = match screenshot {
                 Some(p) => {
@@ -800,13 +812,49 @@ async fn run() -> Result<()> {
                 None => None,
             };
             let mine = c.call("gallery.setup.mine", json!(null)).await?;
-            if mine["can_publish"] != json!(true) {
-                bail!("nothing to publish yet: no theme or plugin from git on this computer");
+            let candidates = mine["candidates"].as_array().cloned().unwrap_or_default();
+            let left_out = |cand: &Value| {
+                without.iter().any(|w| {
+                    let w = w.trim_end_matches('/').trim_end_matches(".git");
+                    cand["name"].as_str() == Some(w)
+                        || cand["url"]
+                            .as_str()
+                            .is_some_and(|u| u.trim_end_matches('/') == w)
+                })
+            };
+            let mut include = Vec::new();
+            println!("This computer:");
+            if let Some(t) = mine["theme"].as_str() {
+                println!("  theme {t}{}", if no_theme { "  (left out)" } else { "" });
+            }
+            for cand in &candidates {
+                let name = cand["title"].as_str().unwrap_or("");
+                let kind = cand["kind"].as_str().unwrap_or("");
+                match cand["url"].as_str() {
+                    None => println!("  {name} ({kind})  no public source; can't be shared"),
+                    Some(url) if left_out(cand) => println!("  {name} ({kind})  {url}  (left out)"),
+                    Some(url) => {
+                        let how = match cand["how"].as_str() {
+                            Some("linked") => "  (a linked checkout)",
+                            Some("catalogue") => "  (from the catalogue)",
+                            _ => "",
+                        };
+                        println!("  {name} ({kind})  {url}{how}");
+                        include.push(url.to_string());
+                    }
+                }
+            }
+            if preview {
+                return Ok(());
+            }
+            if include.is_empty() && (no_theme || mine["theme"].is_null()) {
+                bail!("nothing to publish: everything is left out or has no public source");
             }
             let r = c
                 .call(
                     "gallery.setup.publish",
-                    json!({"title": title, "summary": summary, "screenshot": screenshot}),
+                    json!({"title": title, "summary": summary, "screenshot": screenshot,
+                           "include": include, "without_theme": no_theme}),
                 )
                 .await?;
             println!(

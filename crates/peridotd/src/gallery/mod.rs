@@ -29,6 +29,8 @@ use tokio::task::JoinHandle;
 pub use store::{GalleryStore, Item};
 
 const SUB_ID: &str = "peridot-gallery";
+/// Bump when the catalogues need re-reading because more is kept of them.
+const REGISTRY_SCHEMA: &str = "2";
 const FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 /// Look back this far past the cursor when catching up.
 const CATCH_UP_MARGIN: u64 = 30 * 60;
@@ -164,10 +166,12 @@ impl Gallery {
 
     // ── Catalogues ────────────────────────────────────────────────────
 
-    /// Fetch the catalogues if they're older than a day (or forced).
+    /// Fetch the catalogues if they're older than a day (or forced, or
+    /// read by an older Peridot that kept less of them).
     pub async fn refresh_registries(&self, force: bool) -> anyhow::Result<()> {
         let now = now();
         let mut errors = Vec::new();
+        let force = force || self.store.meta("schema").as_deref() != Some(REGISTRY_SCHEMA);
         for (source, url) in [
             ("plugins", self.plugins_url.as_str()),
             ("themes", self.themes_url.as_str()),
@@ -190,6 +194,7 @@ impl Gallery {
             }
         }
         if errors.is_empty() {
+            self.store.set_meta("schema", REGISTRY_SCHEMA)?;
             Ok(())
         } else {
             bail!("couldn't read the catalogues ({})", errors.join("; "))
@@ -674,6 +679,43 @@ impl Gallery {
         Ok(views)
     }
 
+    /// Everything on this computer a setup could list, with where each
+    /// came from, so you can pick. Installed from git: its origin. A
+    /// link (a checkout you develop): its origin too, but flagged. No
+    /// git at all (installed by a plugin's own installer): the catalogue,
+    /// by the folder's id, when it knows it.
+    pub fn setup_candidates(&self) -> Vec<Candidate> {
+        let mut out = Vec::new();
+        for (kind, dir) in [
+            (ItemKind::Theme, ".config/omarchy/themes"),
+            (ItemKind::Plugin, ".config/omarchy/plugins"),
+        ] {
+            for i in peridot_sync::sync::installed_in(&self.home.join(dir)) {
+                let (url, how) = match i.url.as_deref().and_then(proto::canonical_url) {
+                    Some(u) if i.linked => (Some(u), "linked"),
+                    Some(u) => (Some(u), "git"),
+                    None => match self.store.item_by_catalog_id(&i.name).ok().flatten() {
+                        Some(item) if item.kind == kind => (Some(item.url), "catalogue"),
+                        _ => (None, "unknown"),
+                    },
+                };
+                let title = url
+                    .as_deref()
+                    .and_then(|u| self.store.item(u).ok().flatten())
+                    .map(|it| it.name)
+                    .unwrap_or_else(|| i.name.clone());
+                out.push(Candidate {
+                    kind,
+                    name: i.name,
+                    title,
+                    url,
+                    how,
+                });
+            }
+        }
+        out
+    }
+
     /// What a setup published from this computer would say.
     pub fn my_setup(&self) -> SetupSpec {
         let mut spec = SetupSpec::default();
@@ -898,6 +940,20 @@ impl Gallery {
             .collect();
         (follows, second.len())
     }
+}
+
+/// Something installed here that a setup could include.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Candidate {
+    pub kind: ItemKind,
+    /// The folder it's installed under.
+    pub name: String,
+    /// Its name in the Gallery, when it's known there.
+    pub title: String,
+    /// None when no public source can be told (it can't be shared).
+    pub url: Option<String>,
+    /// `git`, `linked`, `catalogue` or `unknown`.
+    pub how: &'static str,
 }
 
 /// One thing to run for a setup.

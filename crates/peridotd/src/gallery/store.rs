@@ -29,6 +29,10 @@ pub struct Item {
     /// Published by this key (a listing from the Gallery).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publisher: Option<PublicKey>,
+    /// The marketplace's id (`derekross.peridot`), which is also the
+    /// folder a plugin is installed under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -40,7 +44,8 @@ impl GalleryStore {
     pub fn new(db: Db) -> opal_core::Result<Self> {
         db.migrate(
             "peridot.gallery",
-            &["CREATE TABLE gallery_items (
+            &[
+                "CREATE TABLE gallery_items (
                 url TEXT PRIMARY KEY,
                 kind TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -98,7 +103,10 @@ impl GalleryStore {
             CREATE TABLE gallery_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
-            );"],
+            );",
+                "ALTER TABLE gallery_items ADD COLUMN catalog_id TEXT;
+            CREATE INDEX gallery_items_catalog_id ON gallery_items(catalog_id);",
+            ],
         )?;
         Ok(Self { db })
     }
@@ -143,8 +151,21 @@ impl GalleryStore {
             source: "nostr".into(),
             installable: true,
             publisher: Some(l.pubkey),
+            catalog_id: None,
         };
         self.db.with(|c| upsert(c, &item, now, true))
+    }
+
+    /// The item installed under `folder` (a plugin's marketplace id).
+    pub fn item_by_catalog_id(&self, id: &str) -> opal_core::Result<Option<Item>> {
+        self.db.with(|c| {
+            c.query_row(
+                &format!("{ITEM_SELECT} WHERE catalog_id = ?1"),
+                [id],
+                item_row,
+            )
+            .optional()
+        })
     }
 
     pub fn item(&self, url: &str) -> opal_core::Result<Option<Item>> {
@@ -618,7 +639,7 @@ impl GalleryStore {
     }
 }
 
-const ITEM_SELECT: &str = "SELECT url, kind, name, author, description, category, tags, stars, preview, source, installable, publisher FROM gallery_items";
+const ITEM_SELECT: &str = "SELECT url, kind, name, author, description, category, tags, stars, preview, source, installable, publisher, catalog_id FROM gallery_items";
 
 fn upsert(
     c: &rusqlite::Connection,
@@ -634,8 +655,8 @@ fn upsert(
     c.execute(
         &format!(
             "{verb} INTO gallery_items
-             (url, kind, name, author, description, category, tags, stars, preview, source, installable, publisher, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+             (url, kind, name, author, description, category, tags, stars, preview, source, installable, publisher, updated_at, catalog_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
         ),
         params![
             it.url,
@@ -650,7 +671,8 @@ fn upsert(
             it.source,
             it.installable as i64,
             it.publisher.map(|p| p.to_hex()),
-            now as i64
+            now as i64,
+            it.catalog_id
         ],
     )?;
     Ok(())
@@ -660,6 +682,7 @@ fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
     let kind: String = r.get(1)?;
     let tags: String = r.get(6)?;
     let publisher: Option<String> = r.get(11)?;
+    let catalog_id: Option<String> = r.get(12)?;
     Ok(Item {
         url: r.get(0)?,
         kind: ItemKind::parse(&kind).unwrap_or(ItemKind::Plugin),
@@ -673,6 +696,7 @@ fn item_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
         source: r.get(9)?,
         installable: r.get::<_, i64>(10)? != 0,
         publisher: publisher.and_then(|p| PublicKey::from_hex(&p).ok()),
+        catalog_id,
     })
 }
 
@@ -703,6 +727,7 @@ mod tests {
             source: "plugins".into(),
             installable: true,
             publisher: None,
+            catalog_id: Some(format!("id.{name}")),
         }
     }
 
@@ -755,6 +780,11 @@ mod tests {
             ("Renamed", "nostr", Some(pk))
         );
         assert_eq!(s.item_count(), (1, 1));
+        assert_eq!(
+            s.item_by_catalog_id("id.Alpha").unwrap().unwrap().url,
+            a.url
+        );
+        assert!(s.item_by_catalog_id("nope").unwrap().is_none());
     }
 
     #[test]
