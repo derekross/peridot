@@ -16,9 +16,11 @@ pub const DEFAULT_RELAYS: &[&str] = &[
 
 /// Where private links are kept. A link's blob is encrypted, so the server
 /// has to accept arbitrary bytes: media hosts that check for a picture or a
-/// video (blossom.band, blossom.primal.net) answer 415. These four take
+/// video (blossom.band, blossom.primal.net) answer 415. These take
 /// anything, serve it cross-origin to the viewer, and honour removal.
 pub const DEFAULT_SHARE_SERVERS: &[&str] = &[
+    "https://blossom.ditto.pub",
+    "https://blossom.dreamith.to",
     "https://nostr.download",
     "https://blossom.yakihonne.com",
     "https://files.sovbit.host",
