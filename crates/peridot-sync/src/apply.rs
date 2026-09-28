@@ -144,26 +144,36 @@ impl Home {
         }
         let (parent, name) = split(rel);
         let dir = self.open_dir(parent, true)?;
-        match rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        let exists = match rustix::fs::statat(&dir, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(st) => match FileType::from_raw_mode(st.st_mode) {
-                FileType::RegularFile => {}
+                FileType::RegularFile => true,
                 FileType::Symlink => return Err(ApplyError::Symlink(rel.into())),
                 _ => return Err(ApplyError::NotAFile(rel.into())),
             },
-            Err(Errno::NOENT) => {}
+            Err(Errno::NOENT) => false,
             Err(e) => return Err(io(rel, e)),
-        }
+        };
         let tmp = format!(
             ".{name}.peridot-{}",
             hex::encode(crate::crypto::random_bytes::<6>())
         );
-        let fd = rustix::fs::openat(
+        let fd = match rustix::fs::openat(
             &dir,
             tmp.as_str(),
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             mode,
-        )
-        .map_err(|e| io(rel, e))?;
+        ) {
+            Ok(fd) => fd,
+            // A folder we may not add to, holding a file we may write: the
+            // daemon's sandbox mounts the home folder read-only and lets
+            // through only the files it syncs there (`~/.bashrc`), which
+            // can be written but not replaced. Then in place, with the undo
+            // backup as the safety net.
+            Err(Errno::ROFS | Errno::ACCESS | Errno::PERM | Errno::BUSY) if exists => {
+                return self.write_in_place(&dir, rel, name, content, mode);
+            }
+            Err(e) => return Err(io(rel, e)),
+        };
         let result = (|| -> std::io::Result<()> {
             let mut f = std::fs::File::from(fd);
             f.write_all(content)?;
@@ -182,6 +192,37 @@ impl Home {
             });
         }
         Ok(())
+    }
+
+    /// Overwrite an existing regular file where a temporary file can't be
+    /// made next to it: write, cut to length, fsync.
+    fn write_in_place(
+        &self,
+        dir: &OwnedFd,
+        rel: &str,
+        name: &str,
+        content: &[u8],
+        mode: Mode,
+    ) -> Result<()> {
+        let fd = rustix::fs::openat(
+            dir,
+            name,
+            OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|e| io(rel, e))?;
+        let result = (|| -> std::io::Result<()> {
+            let mut f = std::fs::File::from(fd);
+            f.write_all(content)?;
+            f.set_len(content.len() as u64)?;
+            rustix::fs::fchmod(f.as_fd(), mode)?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        result.map_err(|e| ApplyError::Io {
+            path: rel.into(),
+            source: e,
+        })
     }
 
     /// Delete a file (not a link, not a folder). Missing is fine.
@@ -279,6 +320,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = Home::open(dir.path()).unwrap();
         (dir, home)
+    }
+
+    #[test]
+    fn a_file_in_a_folder_we_may_not_add_to_is_written_in_place() {
+        let (dir, home) = home();
+        std::fs::write(dir.path().join(".bashrc"), b"old contents, longer").unwrap();
+        // The folder refuses new entries (no temporary file), the file
+        // itself is writable: the sandbox's view of the home folder.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = home.write(".bashrc", b"new", false);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        r.unwrap();
+        assert_eq!(std::fs::read(dir.path().join(".bashrc")).unwrap(), b"new");
+        // Making a file there is still refused, plainly.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = home.write(".XCompose", b"x", false);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(r.is_err());
     }
 
     #[test]

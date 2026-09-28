@@ -57,10 +57,11 @@ enum Cmd {
     Pair {
         /// The code shown on the new computer.
         code: Option<String>,
-        /// Don't hand the identity's key to the new computer. It then
-        /// needs Opal with this identity to sync.
+        /// Also hand the identity's key to the new computer. Without it
+        /// the new computer syncs, and needs Opal with this identity for
+        /// anything signed as you.
         #[arg(long)]
-        sync_only: bool,
+        hold_key: bool,
     },
     /// Apply incoming settings (all, or just these paths).
     Apply {
@@ -1112,7 +1113,7 @@ async fn run() -> Result<()> {
         }
         Cmd::Pair {
             code: None,
-            sync_only: _,
+            hold_key: _,
         } => {
             c.call("subscribe", json!(null)).await?;
             let v = c.call("pair.new", json!(null)).await?;
@@ -1155,9 +1156,8 @@ async fn run() -> Result<()> {
         }
         Cmd::Pair {
             code: Some(code),
-            sync_only,
+            hold_key,
         } => {
-            let hold_key = !sync_only;
             c.call("subscribe", json!(null)).await?;
             c.call("pair.join", json!({"code": code})).await?;
             println!("Waiting for the new computer…");
@@ -1172,8 +1172,8 @@ async fn run() -> Result<()> {
                             p["other"].as_str().unwrap_or("the new computer"),
                             p["number"].as_str().unwrap_or("")
                         ))?;
-                        if sync_only && p["can_hold_key"] != json!(true) {
-                            println!("(This computer doesn't hold the key anyway.)");
+                        if hold_key && p["can_hold_key"] != json!(true) {
+                            println!("(This computer doesn't hold the key; Opal does.)");
                         }
                         c.call("pair.confirm", json!({"matches": ok, "hold_key": hold_key}))
                             .await?;

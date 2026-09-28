@@ -2,13 +2,23 @@
 //!
 //! The socket is only reachable by the user's own processes, and Peridot
 //! has no passphrase, so it cannot prove which program is calling. What it
-//! can do: tell its own panel and command apart from everything else by
-//! the caller's executable (readable for both), class every method by how
-//! much it can do, and route the dangerous ones through the panel. Same
-//! user code that wants to misbehave can still read the keyring or edit
-//! `~/.config` directly; this stops accidents, sandboxed apps and lazy
-//! misuse, and keeps Peridot's powers (Opal's signature, the sync channel
-//! to your other computers, uploads) from being borrowed quietly.
+//! can do: tell its own panel and command apart from everything else,
+//! class every method by how much it can do, and route the dangerous ones
+//! through the panel. Same user code that wants to misbehave can still
+//! read the keyring or edit `~/.config` directly; this stops accidents,
+//! sandboxed apps and lazy misuse, and keeps Peridot's powers (Opal's
+//! signature, the sync channel to your other computers, uploads) from
+//! being borrowed quietly.
+//!
+//! Telling them apart: by the caller's executable when the daemon can
+//! read it. Inside its sandbox it can't: a user service with any mount
+//! namespacing runs in a child user namespace, and the kernel never lets
+//! such a process read `/proc/<pid>/exe` of one outside it. The cgroup
+//! and the process name stay readable, so the panel is then the process
+//! named `quickshell` inside the desktop session's unit (`wayland-wm@*`
+//! or `omarchy-shell`), which systemd assigns, and the command is the
+//! process named `peridot`. A program of yours can call itself that; it
+//! could as well run the real command, so nothing is lost.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -136,6 +146,43 @@ pub struct Trust {
     pub cli_exes: Vec<PathBuf>,
 }
 
+/// What `/proc` says about a caller besides its executable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Probe {
+    /// The last component of its cgroup path: the systemd unit or scope.
+    pub unit: Option<String>,
+    /// `/proc/<pid>/comm`.
+    pub comm: Option<String>,
+}
+
+impl Probe {
+    pub fn read(pid: Option<i32>) -> Self {
+        let Some(pid) = pid else {
+            return Self::default();
+        };
+        let unit = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("0::"))
+                    .and_then(|p| p.trim().rsplit('/').next())
+                    .map(str::to_string)
+            })
+            .filter(|u| !u.is_empty());
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            .map(|s| s.trim().to_string());
+        Self { unit, comm }
+    }
+}
+
+/// Units the desktop shell runs in (systemd names them, not the process).
+fn is_shell_unit(unit: &str) -> bool {
+    (unit.starts_with("wayland-wm@") && unit.ends_with(".service"))
+        || unit == "omarchy-shell.service"
+        || unit == "quickshell.service"
+}
+
 impl Trust {
     /// The defaults: quickshell for the panel, `peridot` next to this
     /// daemon (or in /usr/bin) for the command. `extra_panel` and
@@ -161,13 +208,26 @@ impl Trust {
     }
 
     pub fn caller(&self, peer: &Peer) -> Caller {
-        let Some(exe) = peer.exe.as_deref() else {
+        self.caller_from(peer.exe.as_deref(), &Probe::read(peer.pid))
+    }
+
+    /// The executable decides when it can be read; otherwise the unit and
+    /// the process name (see the module doc).
+    pub fn caller_from(&self, exe: Option<&Path>, probe: &Probe) -> Caller {
+        if let Some(exe) = exe {
+            if self.panel_exes.iter().any(|p| same_file(p, exe)) {
+                return Caller::Panel;
+            }
+            if self.cli_exes.iter().any(|p| same_file(p, exe)) {
+                return Caller::Cli;
+            }
             return Caller::Other;
-        };
-        if self.panel_exes.iter().any(|p| same_file(p, exe)) {
+        }
+        let comm = probe.comm.as_deref().unwrap_or("");
+        if matches!(comm, "quickshell" | "qs") && probe.unit.as_deref().is_some_and(is_shell_unit) {
             return Caller::Panel;
         }
-        if self.cli_exes.iter().any(|p| same_file(p, exe)) {
+        if comm == "peridot" {
             return Caller::Cli;
         }
         Caller::Other
@@ -324,6 +384,69 @@ mod tests {
         assert_eq!(trust.caller(&peer), Caller::Cli);
         peer.exe = Some(PathBuf::from("/usr/bin/python3"));
         assert_eq!(trust.caller(&peer), Caller::Other);
+    }
+
+    #[test]
+    fn without_a_readable_executable_the_unit_and_name_decide() {
+        let trust = Trust::new(&[], &[]);
+        let probe = |unit: &str, comm: &str| Probe {
+            unit: Some(unit.into()),
+            comm: Some(comm.into()),
+        };
+        // The shell, in the session unit systemd put it in.
+        assert_eq!(
+            trust.caller_from(
+                None,
+                &probe("wayland-wm@hyprland.desktop.service", "quickshell")
+            ),
+            Caller::Panel
+        );
+        assert_eq!(
+            trust.caller_from(None, &probe("omarchy-shell.service", "qs")),
+            Caller::Panel
+        );
+        // A quickshell started from a terminal isn't the panel.
+        assert_eq!(
+            trust.caller_from(
+                None,
+                &probe("app-Hyprland-xdg-terminal-exec-1.scope", "quickshell")
+            ),
+            Caller::Other
+        );
+        // Hyprland's other children aren't either.
+        assert_eq!(
+            trust.caller_from(
+                None,
+                &probe("wayland-wm@hyprland.desktop.service", "hypridle")
+            ),
+            Caller::Other
+        );
+        assert_eq!(
+            trust.caller_from(
+                None,
+                &probe("app-Hyprland-xdg-terminal-exec-1.scope", "peridot")
+            ),
+            Caller::Cli
+        );
+        assert_eq!(
+            trust.caller_from(
+                None,
+                &probe("app-Hyprland-xdg-terminal-exec-1.scope", "python3")
+            ),
+            Caller::Other
+        );
+        assert_eq!(trust.caller_from(None, &Probe::default()), Caller::Other);
+        // A readable executable wins over the name.
+        assert_eq!(
+            trust.caller_from(
+                Some(Path::new("/usr/bin/python3")),
+                &probe("wayland-wm@hyprland.desktop.service", "quickshell")
+            ),
+            Caller::Other
+        );
+        // The daemon's own cgroup line parses.
+        let me = Probe::read(Some(std::process::id() as i32));
+        assert!(me.comm.is_some());
     }
 
     #[test]

@@ -11,9 +11,11 @@
 # runs --check so a tag whose files aren't listed can't be released.
 #
 # Line format: <sha256>\t<label>\t<logical path>, tab-separated. Logical
-# paths: `unit` (dist/peridot.service), `plugin/<file>` (what the plugin copy
-# holds; manifest.json as install.sh renders it), `plugin/.installed-by-peridot`
-# (the marker earlier installs wrote). The label is the tag or version+commit
+# paths: `unit` (dist/peridot.service), `install-unit`
+# (dist/peridot-install@.service), `bin/peridot-install` (the install
+# script), `plugin/<file>` (what the plugin copy holds; manifest.json as
+# install.sh renders it), `plugin/.installed-by-peridot` (the marker earlier
+# installs wrote). The label is the tag or version+commit
 # that first shipped the content; only the hash and the path are compared.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -28,6 +30,12 @@ ref_lines() {
   local ref=$1 label=$2 path rel
   if git cat-file -e "$ref:dist/peridot.service" 2>/dev/null; then
     printf '%s\t%s\t%s\n' "$(git show "$ref:dist/peridot.service" | hash_stdin)" "$label" unit
+  fi
+  if git cat-file -e "$ref:dist/peridot-install@.service" 2>/dev/null; then
+    printf '%s\t%s\t%s\n' "$(git show "$ref:dist/peridot-install@.service" | hash_stdin)" "$label" install-unit
+  fi
+  if git cat-file -e "$ref:dist/peridot-install" 2>/dev/null; then
+    printf '%s\t%s\t%s\n' "$(git show "$ref:dist/peridot-install" | hash_stdin)" "$label" bin/peridot-install
   fi
   while IFS= read -r path; do
     rel=${path#shell-plugin/}
@@ -47,6 +55,8 @@ ref_lines() {
 tree_lines() {
   local label=$1 path rel
   printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot.service)" "$label" unit
+  printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot-install@.service)" "$label" install-unit
+  printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot-install)" "$label" bin/peridot-install
   while IFS= read -r -d '' path; do
     rel=${path#shell-plugin/}
     [[ $rel == manifest.json ]] && continue
@@ -69,7 +79,7 @@ ref_label() {
 
 generate() {
   {
-    for ref in $(git rev-list --reverse "$FIRST^..HEAD" -- shell-plugin manifest.json dist/peridot.service) \
+    for ref in $(git rev-list --reverse "$FIRST^..HEAD" -- shell-plugin manifest.json dist/peridot.service dist/peridot-install@.service dist/peridot-install) \
                $(git tag -l 'v*'); do
       ref_lines "$ref" "$(ref_label "$ref")"
     done

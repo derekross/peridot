@@ -25,7 +25,7 @@ Column {
     return base
   }
   readonly property bool isNew: p.role === "new"
-  property bool holdKey: true
+  property bool holdKey: false
 
   function refreshCode() {
     var base = svc && svc.pairing ? svc.pairing : null
@@ -42,7 +42,7 @@ Column {
 
   spacing: Style.space(10)
 
-  onVisibleChanged: if (!visible) holdKey = true
+  onVisibleChanged: if (!visible) holdKey = false
 
   PanelSectionHeader {
     text: root.isNew ? "ADD THIS COMPUTER" : "PAIR A NEW COMPUTER"
