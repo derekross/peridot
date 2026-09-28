@@ -33,6 +33,10 @@ pub const APP_NAME: &str = "Peridot";
 /// Gallery's public events: a profile, your follow list, taking something
 /// back, seals for private messages, likes, reviews, listings and setups.
 pub const KINDS: [u16; 12] = [30078, 22242, 24242, 0, 3, 5, 7, 13, 17, 1111, 1985, 30490];
+/// What syncing alone needs: data, relay logins, upload authorizations.
+/// The rest is declared once you open the Gallery (Opal asks again then),
+/// so a sync-only Peridot can't be made to post as you.
+pub const SYNC_KINDS: [u16; 3] = [30078, 22242, 24242];
 /// Kinds Opal treats as sensitive: it asks each time unless you allowed it
 /// for a while, so the panel says "look at Opal".
 const PROMPT_KINDS: [u16; 6] = [22242, 24242, 0, 3, 5, 13];
@@ -202,7 +206,11 @@ impl OpalClient {
 
     /// Pair: Opal shows a prompt in the bar and answers when you do. On
     /// success the token is kept here (the caller saves it).
-    pub async fn connect(&self, pubkey: Option<&PublicKey>) -> anyhow::Result<Paired> {
+    pub async fn connect(
+        &self,
+        pubkey: Option<&PublicKey>,
+        gallery: bool,
+    ) -> anyhow::Result<Paired> {
         if self.0.connecting.swap(true, Ordering::SeqCst) {
             anyhow::bail!("Peridot is already waiting for your answer in Opal");
         }
@@ -210,10 +218,10 @@ impl OpalClient {
         let mut params = json!({
             "app": APP_KEY,
             "name": APP_NAME,
-            "kinds": KINDS,
+            "kinds": if gallery { KINDS.to_vec() } else { SYNC_KINDS.to_vec() },
             "nip44": true,
-            // Private messages: NIP-44 to the recipient's key.
-            "dm": true,
+            // Private messages: NIP-44 to the recipient's key (Gallery era).
+            "dm": gallery,
         });
         if let Some(pk) = pubkey {
             params["pubkey"] = json!(pk.to_hex());
@@ -381,19 +389,10 @@ impl OpalClient {
         if msg.contains("didn't declare kind")
             || msg.contains("didn't ask to send private messages")
         {
-            // A pairing from an older Peridot: Opal needs to hear the new
-            // list. Same road as a lost token: pair again.
-            let current = self
-                .0
-                .token
-                .read()
-                .unwrap_or_else(|p| p.into_inner())
-                .as_deref()
-                .map(String::as_str)
-                == Some(used);
-            if current {
-                self.mark_unpaired();
-            }
+            // The pairing predates what was asked for (the Gallery's kinds
+            // are declared on first use). Not a lost token, so no automatic
+            // re-pair: the Gallery's own "turn on" step, or "Pair with
+            // Opal", declares them.
             SignError::Unavailable(PAIR_AGAIN_NEW.into())
         } else if msg.contains("not paired") || msg.contains("different program") {
             let current = self
@@ -681,13 +680,14 @@ mod tests {
             &t
         )));
         assert!(c.is_held());
-        // A pairing from an older Peridot: pair again, like a lost token.
+        // A pairing that predates the Gallery's kinds: try again once they
+        // are declared, but not a lost token.
         assert!(unavailable(c.classify(
             "Peridot didn't declare kind 17 when it paired",
             Mode::Background,
             &t
         )));
-        assert!(c.needs_pairing());
+        assert!(!c.needs_pairing());
     }
 
     #[tokio::test]

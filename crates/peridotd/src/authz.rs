@@ -65,6 +65,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("gallery.following", Class::Read),
     ("gallery.setups", Class::Read),
     ("gallery.setup.mine", Class::Read),
+    ("gallery.setup.steps", Class::Read),
     ("items.defaults", Class::Read),
     ("identity.card", Class::Read),
     ("profile.get", Class::Read),
@@ -93,6 +94,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("share.text", Class::Sensitive),
     ("share.send", Class::Sensitive),
     ("gallery.review", Class::Sensitive),
+    ("gallery.enable", Class::Sensitive),
     ("gallery.list_item", Class::Sensitive),
     ("gallery.setup.publish", Class::Sensitive),
     ("gallery.setup.remove", Class::Sensitive),
@@ -264,7 +266,13 @@ pub fn describe(method: &str, params: &serde_json::Value) -> String {
             "install {}",
             params["url"].as_str().unwrap_or("a theme or plugin")
         ),
-        "gallery.setup.install" => "install everything in someone's setup".into(),
+        "gallery.setup.install" => format!(
+            "run one step of someone's setup ({})",
+            params["step"]["url"]
+                .as_str()
+                .or(params["step"]["name"].as_str())
+                .unwrap_or("a theme or plugin")
+        ),
         "offer.accept" => format!(
             "install or switch to {}",
             params["name"]
@@ -289,10 +297,8 @@ mod tests {
                 && let Some(end) = rest.find("\" =>")
             {
                 let m = &rest[..end];
-                if m.contains('.') || m == "status" || m == "apply" {
-                    if classify(m).is_none() {
-                        missing.push(m.to_string());
-                    }
+                if (m.contains('.') || m == "status" || m == "apply") && classify(m).is_none() {
+                    missing.push(m.to_string());
                 }
             }
         }

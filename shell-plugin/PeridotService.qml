@@ -66,12 +66,24 @@ Item {
   }
 
   function startDaemon() {
-    Quickshell.execDetached(["systemctl", "--user", "start", "peridot.service"])
+    Quickshell.execDetached(["/usr/bin/systemctl", "--user", "start", "peridot.service"])
     reconnectNow()
   }
 
+  // The clipboard gets the text over stdin, never as an argument (arguments
+  // are readable by every process while wl-copy serves the clipboard).
+  property string _clip: ""
+  Process {
+    id: clipProc
+    command: ["/usr/bin/wl-copy"]
+    stdinEnabled: true
+    onStarted: { write(root._clip); root._clip = ""; stdinEnabled = false }
+  }
+
   function copy(text, what) {
-    Quickshell.execDetached(["wl-copy", "--", text])
+    root._clip = text
+    if (clipProc.running) clipProc.signal(15)
+    clipProc.running = true
     message((what || "Copied") + " to the clipboard", false)
   }
 

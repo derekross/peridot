@@ -207,6 +207,50 @@ Item {
           }
         }
 
+        // ── The peridot command is asking for something only you may allow ──
+        Repeater {
+          model: root.up ? (root.svc.status.approvals || []) : []
+          delegate: Column {
+            required property var modelData
+            width: parent.width
+            spacing: Style.space(6)
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              text: "The peridot command wants to " + modelData.summary + "."
+            }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              color: root.dim
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              text: "Only allow it if you just ran that command yourself."
+            }
+            Row {
+              spacing: Style.space(8)
+              Button {
+                text: "Allow"
+                iconText: "󰄬"
+                bordered: true
+                foreground: root.foreground
+                onClicked: root.svc.run("approvals.answer", { id: modelData.id, ok: true, confirm: true })
+              }
+              Button {
+                text: "Refuse"
+                iconText: "󰅖"
+                foreground: root.urgent
+                onClicked: root.svc.run("approvals.answer", { id: modelData.id, ok: false, confirm: true })
+              }
+            }
+          }
+        }
+
         // ── Pairing in progress (either side) ─────────────────────
         PairCard {
           width: parent.width

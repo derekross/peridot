@@ -33,9 +33,13 @@ impl Daemon {
     async fn start_with(relay: &str, name: &str, opal: Option<&Path>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("config.toml");
+        // Sync-only daemons keep the Gallery off: no catalogue downloads,
+        // no public relays, in a test.
         std::fs::write(
             &config,
-            format!("relays = [\"{relay}\"]\ndevice_name = \"{name}\"\n"),
+            format!(
+                "relays = [\"{relay}\"]\ndevice_name = \"{name}\"\n[gallery]\nenabled = false\n"
+            ),
         )
         .unwrap();
         Self::start_in(dir, config, opal).await
@@ -420,6 +424,8 @@ impl FakeOpal {
         let signs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accounts = std::sync::Arc::new(std::sync::Mutex::new(vec![keys.clone()]));
         let paired_key = std::sync::Arc::new(std::sync::Mutex::new(None::<Keys>));
+        // How many kinds the last pairing declared (3 = sync only).
+        let declared_kinds = std::sync::Arc::new(std::sync::Mutex::new(0usize));
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let shared = (
             keys.clone(),
@@ -431,14 +437,25 @@ impl FakeOpal {
             signs.clone(),
             accounts.clone(),
             paired_key.clone(),
+            declared_kinds.clone(),
         );
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
-                let (k0, l, label, answer, token, connects, signs, accounts, paired_key) =
-                    shared.clone();
+                let (
+                    k0,
+                    l,
+                    label,
+                    answer,
+                    token,
+                    connects,
+                    signs,
+                    accounts,
+                    paired_key,
+                    declared_kinds,
+                ) = shared.clone();
                 tokio::spawn(async move {
                     let (r, mut w) = stream.into_split();
                     let mut lines = BufReader::new(r).lines();
@@ -478,9 +495,15 @@ impl FakeOpal {
                             "app.connect" => {
                                 assert_eq!(p["app"], json!("peridot"));
                                 assert_eq!(p["name"], json!("Peridot"));
-                                assert_eq!(p["kinds"], json!(DECLARED));
+                                let declared: Vec<u16> =
+                                    serde_json::from_value(p["kinds"].clone()).unwrap();
+                                assert!(
+                                    declared == DECLARED.to_vec()
+                                        || declared == vec![30078u16, 22242, 24242],
+                                    "{declared:?}"
+                                );
                                 assert_eq!(p["nip44"], json!(true));
-                                assert_eq!(p["dm"], json!(true));
+                                assert_eq!(p["dm"], json!(declared.len() > 3));
                                 // Which account: the named one, else the first.
                                 let chosen = match p["pubkey"].as_str() {
                                     Some(pk) => all
@@ -497,6 +520,7 @@ impl FakeOpal {
                                     let t = Keys::generate().secret_key().to_secret_hex();
                                     *token.lock().unwrap() = Some(t.clone());
                                     *paired_key.lock().unwrap() = Some(chosen.clone());
+                                    *declared_kinds.lock().unwrap() = declared.len();
                                     connects.fetch_add(1, Ordering::SeqCst);
                                     Ok(json!({"token": t, "pubkey": chosen.public_key().to_hex()}))
                                 }
@@ -511,7 +535,10 @@ impl FakeOpal {
                                 let unsigned: UnsignedEvent =
                                     serde_json::from_value(p["event"].clone()).unwrap();
                                 let kind = unsigned.kind.as_u16();
-                                if !DECLARED.contains(&kind) {
+                                let allowed = *declared_kinds.lock().unwrap();
+                                if !DECLARED.contains(&kind)
+                                    || (allowed == 3 && ![30078u16, 22242, 24242].contains(&kind))
+                                {
                                     Err(format!(
                                         "Peridot didn't declare kind {kind} when it paired"
                                     ))
@@ -1571,6 +1598,25 @@ async fn opal_signs_gallery_events_and_seals_messages() {
     .await;
 
     let clock = "https://github.com/derekross/omarchy-calendar";
+    // A sync-only pairing can't like: the Gallery's kinds weren't declared.
+    assert_eq!(desk.status().await["gallery"]["needs_enable"], json!(true));
+    let mut c = crate::Client::open(&desk.socket).await;
+    let e = c
+        .call("gallery.like", json!({"url": clock, "on": true}))
+        .await
+        .unwrap_err();
+    assert!(
+        e.contains("Pair Peridot with Opal again") || e.contains("didn't declare"),
+        "{e}"
+    );
+    let connects = opal.connects();
+    desk.call("gallery.enable", json!(null)).await;
+    assert_eq!(
+        opal.connects(),
+        connects + 1,
+        "enabling the Gallery pairs again"
+    );
+    assert_eq!(desk.status().await["gallery"]["needs_enable"], json!(false));
     let signs = opal.signs();
     desk.call("gallery.like", json!({"url": clock, "on": true}))
         .await;

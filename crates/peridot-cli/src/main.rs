@@ -784,6 +784,7 @@ async fn run() -> Result<()> {
             println!("Review posted.");
         }
         Cmd::Install { url } => {
+            println!("{APPROVAL_HINT}");
             let v = c.call("gallery.item", json!({"url": url})).await?;
             let kind = v["item"]["kind"].as_str().unwrap_or("plugin").to_string();
             println!(
@@ -879,16 +880,38 @@ async fn run() -> Result<()> {
             );
         }
         Cmd::InstallSetup { coordinate } => {
-            println!("Installing… (each theme and plugin is one Omarchy command)");
-            let r = c
-                .call("gallery.setup.install", json!({"coordinate": coordinate}))
+            println!("{APPROVAL_HINT}");
+            let steps = c
+                .call("gallery.setup.steps", json!({"coordinate": coordinate}))
                 .await?;
-            let done = r["done"].as_array().map(Vec::len).unwrap_or(0);
-            let failed = r["failed"].as_array().cloned().unwrap_or_default();
-            println!("{done} step(s) done, {} failed.", failed.len());
-            for f in failed {
-                println!("  {}: {}", f["step"], f["error"].as_str().unwrap_or(""));
+            let steps = steps.as_array().cloned().unwrap_or_default();
+            if steps.is_empty() {
+                println!("Nothing to do: everything in that setup is already here.");
+                return Ok(());
             }
+            println!(
+                "{} step(s), each one an Omarchy command, each confirmed in Peridot's panel:",
+                steps.len()
+            );
+            let (mut done, mut failed) = (0, 0);
+            for step in steps {
+                let what = step["url"].as_str().or(step["name"].as_str()).unwrap_or("");
+                println!("  {} {what}…", step["kind"].as_str().unwrap_or(""));
+                match c
+                    .call(
+                        "gallery.setup.install",
+                        json!({"coordinate": coordinate, "step": step}),
+                    )
+                    .await
+                {
+                    Ok(_) => done += 1,
+                    Err(e) => {
+                        failed += 1;
+                        println!("    {e}");
+                    }
+                }
+            }
+            println!("{done} step(s) done, {failed} failed.");
         }
         Cmd::Name { name } => {
             let p = c.call("profile.set", json!({"name": name})).await?;
@@ -903,6 +926,7 @@ async fn run() -> Result<()> {
             println!("Paired. Opal lists Peridot under Apps.");
         }
         Cmd::Opal { cmd: OpalCmd::Move } => {
+            println!("{APPROVAL_HINT}");
             let s = c.call("status", json!(null)).await?;
             if s["identity"]["mode"] == json!("opal") {
                 bail!("Opal already holds your key");
@@ -1105,6 +1129,7 @@ async fn run() -> Result<()> {
                             p["other"].as_str().unwrap_or("the other computer"),
                             p["number"].as_str().unwrap_or("")
                         ))?;
+                        println!("{APPROVAL_HINT}");
                         c.call("pair.confirm", json!({"matches": ok})).await?;
                         if !ok {
                             bail!("pairing cancelled; nothing was shared");
@@ -1255,6 +1280,7 @@ async fn run() -> Result<()> {
             println!("Removed.");
         }
         Cmd::Recovery => {
+            println!("{APPROVAL_HINT}");
             println!("Making your recovery kit…");
             let r = c.call("recovery.create", json!(null)).await?;
             println!("\nWrite down these six words and keep them somewhere safe:\n");
@@ -1278,6 +1304,7 @@ async fn run() -> Result<()> {
             println!("Restored. Your settings are arriving; review them with `peridot status`.");
         }
         Cmd::Leave => {
+            println!("{APPROVAL_HINT}");
             if yes("Stop syncing on this computer? Your settings here stay as they are.")? {
                 c.call("setup.leave", json!(null)).await?;
                 println!("Done. Your other computers keep syncing.");
@@ -1442,5 +1469,7 @@ fn print_status(s: &Value) {
     }
 }
 
+/// Dangerous things from the command line wait for a yes in the panel.
+const APPROVAL_HINT: &str = "Peridot's panel will ask you to allow this (open it from the bar); it waits up to two minutes.";
 const OPAL_WILL_ASK: &str =
     "Opal will ask you to approve Peridot: look for its prompt in your bar.";

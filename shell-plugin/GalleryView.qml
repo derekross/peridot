@@ -14,6 +14,18 @@ Column {
   readonly property color dim: Qt.darker(foreground, 1.55)
 
   readonly property var gallery: svc && svc.status.gallery ? svc.status.gallery : ({})
+  readonly property bool needsEnable: gallery.needs_enable === true
+  property bool enabling: false
+  function enable() {
+    if (enabling) return
+    enabling = true
+    svc.message("Approve Peridot in Opal's bar…", false)
+    svc.call("gallery.enable", null, function(err) {
+      root.enabling = false
+      if (err) root.svc.message(err, true)
+      else root.reload(false)
+    })
+  }
   readonly property bool catalogued: (gallery.themes || 0) + (gallery.plugins || 0) > 0
   // A name is needed before the first like, review or setup.
   readonly property bool needsName: gallery.profile === null
@@ -170,7 +182,7 @@ Column {
     if (busyUrl !== "") return
     busyUrl = item.url
     svc.message("Installing " + item.name + "…", false)
-    svc.call("gallery.install", { url: item.url, kind: item.kind }, function(err) {
+    svc.call("gallery.install", { url: item.url, kind: item.kind, confirm: true }, function(err) {
       root.busyUrl = ""
       if (err) { root.svc.message(err, true); return }
       root.svc.message("Installed " + item.name, false)
@@ -203,18 +215,32 @@ Column {
     })
   }
 
+  // A setup is installed one step at a time, each its own confirmed
+  // Omarchy command (plugins are code; Omarchy's own prompt shows too).
   function installSetup(s) {
     if (confirmInstall !== s.coordinate) { confirmInstall = s.coordinate; return }
     confirmInstall = ""
     if (busyUrl !== "") return
     busyUrl = s.coordinate
-    svc.message("Installing " + s.title + "… this can take a few minutes", false)
-    svc.call("gallery.setup.install", { coordinate: s.coordinate }, function(err, r) {
+    svc.call("gallery.setup.steps", { coordinate: s.coordinate }, function(err, steps) {
+      if (err) { root.busyUrl = ""; root.svc.message(err, true); return }
+      root.runSteps(s, steps || [], 0, 0)
+    })
+  }
+
+  function runSteps(s, steps, i, failed) {
+    if (i >= steps.length) {
       root.busyUrl = ""
-      if (err) { root.svc.message(err, true); return }
-      var failed = (r && r.failed) ? r.failed.length : 0
-      root.svc.message(failed > 0 ? "Done, but " + failed + " step(s) failed: " + r.failed[0].error : "Done", failed > 0)
+      root.svc.message(failed > 0 ? "Done, but " + failed + " step(s) failed" : "Done", failed > 0)
       root.reload(true)
+      return
+    }
+    var step = steps[i]
+    var what = step.url || step.name || ""
+    root.svc.message("Step " + (i + 1) + " of " + steps.length + ": " + what + "…", false)
+    svc.call("gallery.setup.install", { coordinate: s.coordinate, step: step, confirm: true }, function(err) {
+      if (err) { root.svc.message(err, true); failed++ }
+      root.runSteps(s, steps, i + 1, failed)
     })
   }
 
@@ -271,6 +297,31 @@ Column {
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
     text: "Themes, plugins and whole setups from other Omarchy users. Likes come from real people; the ones you follow count for more."
+  }
+  // With Opal holding the key, the Gallery's kinds are declared on first
+  // use: Opal asks once.
+  Column {
+    width: parent.width
+    visible: root.needsEnable
+    spacing: Style.space(6)
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+      text: "Liking, reviewing and publishing here signs as you through Opal. Turn the Gallery on once, and Opal will ask what Peridot may sign."
+    }
+    Button {
+      text: root.enabling ? "Waiting for Opal…" : "Turn on the Gallery"
+      iconText: "󰇈"
+      iconSpinning: root.enabling
+      enabled: !root.enabling
+      bordered: true
+      foreground: root.foreground
+      onClicked: root.enable()
+    }
   }
 
   Row {

@@ -454,6 +454,24 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
         }
 
         // ── The Gallery ────────────────────────────────────────────────
+        "gallery.enable" => {
+            // First use: with Opal holding the key, declare the Gallery's
+            // kinds by pairing again (Opal asks once).
+            let engine = app.engine().await?;
+            if !app.gallery_declared() {
+                app.db.set_kv("peridot.gallery_declared", "1")?;
+                app.opal.clear_hold();
+                if engine.identity().via_opal_mode() {
+                    let pubkey = engine.identity().pubkey();
+                    if let Err(e) = app.pair_opal(Some(pubkey)).await {
+                        app.db.set_kv("peridot.gallery_declared", "0")?;
+                        bail!("{}", pair_error(&e));
+                    }
+                }
+                app.emit_state().await;
+            }
+            Ok(json!({"ok": true}))
+        }
         "gallery.list" => {
             #[derive(Deserialize, Default)]
             #[serde(default)]
@@ -668,9 +686,9 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .map_err(gallery_err)?;
             Ok(json!({"ok": true}))
         }
-        "gallery.setup.install" => {
-            // Everything in someone's setup that isn't here yet, then
-            // their theme. Each step is one of the commands the offers run.
+        "gallery.setup.steps" => {
+            // What installing someone's setup would run, in order, so the
+            // panel can confirm each step (nothing is run here).
             #[derive(Deserialize)]
             struct P {
                 coordinate: String,
@@ -681,35 +699,46 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 .store
                 .setup(&p.coordinate)?
                 .ok_or_else(|| anyhow::anyhow!("no such setup"))?;
-            let mut done = Vec::new();
-            let mut failed = Vec::new();
-            for step in g.setup_steps(&setup) {
-                let r = match &step {
-                    crate::gallery::Step::InstallTheme(url) if valid_source(url) => {
-                        run_omarchy("omarchy-theme-install", &[url]).await
-                    }
-                    crate::gallery::Step::InstallPlugin(url) if valid_source(url) => {
-                        run_omarchy("omarchy-plugin-add", &[url, "--yes"]).await
-                    }
-                    crate::gallery::Step::SwitchTheme(name) if valid_name(name) => {
-                        let r = run_omarchy("omarchy-theme-set", &[name]).await;
-                        if r.is_ok()
-                            && let Ok(engine) = app.engine().await
-                        {
-                            let _ = engine.theme_applied(name);
-                        }
-                        r
-                    }
-                    _ => Err(anyhow::anyhow!("that isn't something Peridot can install")),
-                };
-                match r {
-                    Ok(()) => done.push(step),
-                    Err(e) => failed.push(json!({"step": step, "error": e.to_string()})),
+            Ok(json!(g.setup_steps(&setup)))
+        }
+        "gallery.setup.install" => {
+            // One step of someone's setup: a theme install, a plugin
+            // install, or the theme switch. Confirmed one at a time.
+            #[derive(Deserialize)]
+            struct P {
+                coordinate: String,
+                step: crate::gallery::StepIn,
+            }
+            let p: P = parse(params)?;
+            let g = app.gallery().await?;
+            let setup = g
+                .store
+                .setup(&p.coordinate)?
+                .ok_or_else(|| anyhow::anyhow!("no such setup"))?;
+            // Only steps the setup actually lists.
+            let step = g
+                .setup_steps(&setup)
+                .into_iter()
+                .find(|s| p.step.matches(s))
+                .ok_or_else(|| anyhow::anyhow!("that setup doesn't include this step"))?;
+            match &step {
+                crate::gallery::Step::InstallTheme(url) if valid_source(url) => {
+                    run_omarchy("omarchy-theme-install", &[url]).await?
                 }
+                crate::gallery::Step::InstallPlugin(url) if valid_source(url) => {
+                    run_omarchy("omarchy-plugin-add", &[url]).await?
+                }
+                crate::gallery::Step::SwitchTheme(name) if valid_name(name) => {
+                    run_omarchy("omarchy-theme-set", &[name]).await?;
+                    if let Ok(engine) = app.engine().await {
+                        let _ = engine.theme_applied(name);
+                    }
+                }
+                _ => bail!("that isn't something Peridot can install"),
             }
             app.nudge.notify_one();
             app.emit_state().await;
-            Ok(json!({"done": done, "failed": failed}))
+            Ok(json!({"done": step}))
         }
         "gallery.install" => {
             #[derive(Deserialize)]
@@ -726,7 +755,8 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             );
             match p.kind {
                 ItemKind::Theme => run_omarchy("omarchy-theme-install", &[&url]).await?,
-                ItemKind::Plugin => run_omarchy("omarchy-plugin-add", &[&url, "--yes"]).await?,
+                // Omarchy's own prompt shows too: a plugin is code.
+                ItemKind::Plugin => run_omarchy("omarchy-plugin-add", &[&url]).await?,
             }
             app.nudge.notify_one();
             app.emit_state().await;
@@ -892,7 +922,7 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 }
                 // You confirmed in Peridot; the command would otherwise ask again.
                 Offer::InstallPlugin { url, .. } => {
-                    run_omarchy("omarchy-plugin-add", &[url, "--yes"]).await?
+                    run_omarchy("omarchy-plugin-add", &[url]).await?
                 }
             }
             app.nudge.notify_one();
@@ -1238,26 +1268,30 @@ fn offer_from(params: Value) -> Result<Offer> {
         InstallTheme { name: String, url: String },
         InstallPlugin { name: String, url: String },
     }
-    // Checked again here: these become command arguments.
+    // Checked again here: these become command arguments. Only the hosts
+    // the Gallery accepts, in their one canonical spelling.
+    let canon = |url: &str| peridot_sync::gallery::canonical_url(url).filter(|u| valid_source(u));
     let offer = match parse::<O>(params)? {
         O::Theme { name } if valid_name(&name) => Offer::Theme {
             name,
             from: String::new(),
         },
-        O::InstallTheme { name, url } if valid_name(&name) && valid_source(&url) => {
-            Offer::InstallTheme {
+        O::InstallTheme { name, url } if valid_name(&name) => match canon(&url) {
+            Some(url) => Offer::InstallTheme {
                 name,
                 url,
                 from: String::new(),
-            }
-        }
-        O::InstallPlugin { name, url } if valid_plugin_id(&name) && valid_source(&url) => {
-            Offer::InstallPlugin {
+            },
+            None => bail!("that isn't something Peridot can install"),
+        },
+        O::InstallPlugin { name, url } if valid_plugin_id(&name) => match canon(&url) {
+            Some(url) => Offer::InstallPlugin {
                 name,
                 url,
                 from: String::new(),
-            }
-        }
+            },
+            None => bail!("that isn't something Peridot can install"),
+        },
         _ => bail!("that isn't something Peridot can install"),
     };
     Ok(offer)

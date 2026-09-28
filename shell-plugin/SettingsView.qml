@@ -62,7 +62,7 @@ Column {
   }
 
   function startMove() {
-    svc.call("identity.move.start", null, function(err, r) {
+    svc.call("identity.move.start", { confirm: true }, function(err, r) {
       if (err) { root.svc.message(err, true); return }
       root.move = r
       root.moveState = "waiting"
@@ -87,7 +87,7 @@ Column {
     if (root.finishing) return
     root.finishing = true
     root.moveState = "finishing"
-    svc.call("identity.move.finish", null, function(err, r) {
+    svc.call("identity.move.finish", { confirm: true }, function(err, r) {
       root.finishing = false
       if (err) { root.moveState = "found"; root.svc.message(err, true); return }
       Quickshell.execDetached(["/usr/bin/wl-copy", "--clear"])
@@ -540,7 +540,7 @@ Column {
     onClicked: {
       if (root.making) return
       root.making = true
-      root.svc.call("recovery.create", null, function(err, r) {
+      root.svc.call("recovery.create", { confirm: true }, function(err, r) {
         if (err) { root.making = false; root.svc.message(err, true); return }
         root.kit = r
         root.svc.call("recovery.save_page", { code: r.code }, function(err2, saved) {
@@ -603,7 +603,7 @@ Column {
     onClicked: {
       if (!root.confirmLeave) { root.confirmLeave = true; return }
       root.confirmLeave = false
-      root.svc.run("setup.leave", null)
+      root.svc.run("setup.leave", { confirm: true })
     }
   }
   Text {

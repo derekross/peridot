@@ -105,7 +105,10 @@ impl App {
     /// Pair with Opal (a prompt appears in its bar) and keep the token.
     /// `pubkey` says which account, when known.
     pub async fn pair_opal(self: &Arc<Self>, pubkey: Option<PublicKey>) -> anyhow::Result<Paired> {
-        let result = self.opal.connect(pubkey.as_ref()).await;
+        let result = self
+            .opal
+            .connect(pubkey.as_ref(), self.gallery_declared())
+            .await;
         if let Ok(p) = &result {
             if pubkey.is_some_and(|pk| pk != p.pubkey) {
                 self.opal.set_token(None);
@@ -117,6 +120,17 @@ impl App {
         }
         self.emit_state().await;
         result
+    }
+
+    /// Whether this computer has asked Opal for the Gallery's kinds (set
+    /// the first time the Gallery is used; a re-pair declares them).
+    pub fn gallery_declared(&self) -> bool {
+        self.db
+            .get_kv("peridot.gallery_declared")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some("1")
     }
 
     /// Set up in Opal mode: the identity Opal signs for.
@@ -461,6 +475,9 @@ impl App {
                 let (following, second) = g.wot_size();
                 json!({
                     "enabled": true,
+                    // Opal mode: the Gallery's kinds haven't been declared
+                    // yet; the first use asks Opal once.
+                    "needs_enable": identity.via_opal_mode() && !self.gallery_declared(),
                     "themes": themes,
                     "plugins": plugins,
                     "following": following,
