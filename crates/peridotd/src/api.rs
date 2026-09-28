@@ -485,6 +485,21 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             }
             Ok(json!(g.publish_setup(spec).await.map_err(gallery_err)?))
         }
+        "gallery.setup.like" => {
+            #[derive(Deserialize)]
+            struct P {
+                coordinate: String,
+                #[serde(default = "yes")]
+                on: bool,
+            }
+            let p: P = parse(params)?;
+            app.gallery()
+                .await?
+                .like_setup(&p.coordinate, p.on)
+                .await
+                .map_err(gallery_err)?;
+            Ok(json!({"ok": true}))
+        }
         "gallery.setup.remove" => {
             #[derive(Deserialize)]
             struct P {

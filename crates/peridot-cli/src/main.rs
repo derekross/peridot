@@ -129,7 +129,8 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// Like a theme or plugin (by repository address).
+    /// Like a theme or plugin (by repository address), or a setup (by its
+    /// address from `peridot gallery --setups`).
     Like {
         url: String,
         /// Take the like back.
@@ -743,8 +744,16 @@ async fn run() -> Result<()> {
             }
         }
         Cmd::Like { url, undo } => {
-            c.call("gallery.like", json!({"url": url, "on": !undo}))
+            if url.starts_with("30490:") {
+                c.call(
+                    "gallery.setup.like",
+                    json!({"coordinate": url, "on": !undo}),
+                )
                 .await?;
+            } else {
+                c.call("gallery.like", json!({"url": url, "on": !undo}))
+                    .await?;
+            }
             println!("{}", if undo { "Like taken back." } else { "Liked." });
         }
         Cmd::Review { url, text, rating } => {

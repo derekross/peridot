@@ -32,7 +32,7 @@ pub const APP_NAME: &str = "Peridot";
 /// (NIP-42), Blossom upload/delete authorizations (private links), and the
 /// Gallery's public events: a profile, your follow list, taking something
 /// back, seals for private messages, likes, reviews, listings and setups.
-pub const KINDS: [u16; 11] = [30078, 22242, 24242, 0, 3, 5, 13, 17, 1111, 1985, 30490];
+pub const KINDS: [u16; 12] = [30078, 22242, 24242, 0, 3, 5, 7, 13, 17, 1111, 1985, 30490];
 /// Kinds Opal treats as sensitive: it asks each time unless you allowed it
 /// for a while, so the panel says "look at Opal".
 const PROMPT_KINDS: [u16; 6] = [22242, 24242, 0, 3, 5, 13];

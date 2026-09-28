@@ -29,6 +29,8 @@ use nostr_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub const KIND_LIKE: u16 = 17;
+/// A like on a setup: NIP-25 reaction to the addressable event.
+pub const KIND_REACTION: u16 = 7;
 pub const KIND_REVIEW: u16 = 1111;
 pub const KIND_LABEL: u16 = 1985;
 pub const KIND_SETUP: u16 = 30490;
@@ -125,6 +127,30 @@ pub fn like(url: &str, pubkey: PublicKey) -> UnsignedEvent {
         .tag(Tag::custom("r", [url]))
         .tag(Tag::custom("k", ["web"]))
         .finalize_unsigned(pubkey)
+}
+
+/// A like on a setup: kind 7 pointing at its coordinate.
+pub fn like_setup(coordinate: &str, author: PublicKey, pubkey: PublicKey) -> UnsignedEvent {
+    EventBuilder::new(Kind::Custom(KIND_REACTION), "+")
+        .tag(Tag::custom("a", [coordinate]))
+        .tag(Tag::custom("k", [KIND_SETUP.to_string()]))
+        .tag(Tag::public_key(author))
+        .finalize_unsigned(pubkey)
+}
+
+/// `30490:<pubkey>:<slug>` → the parts, when well-formed.
+pub fn parse_setup_coordinate(c: &str) -> Option<(PublicKey, String)> {
+    let mut parts = c.splitn(3, ':');
+    let kind: u16 = parts.next()?.parse().ok()?;
+    if kind != KIND_SETUP {
+        return None;
+    }
+    let pk = PublicKey::from_hex(parts.next()?).ok()?;
+    let slug = parts.next()?;
+    if slug.is_empty() || slug.len() > 64 {
+        return None;
+    }
+    Some((pk, slug.to_string()))
 }
 
 /// Taking something back (a like, a review, a setup): NIP-09, with the
@@ -278,6 +304,7 @@ pub fn slug(title: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Like {
     pub id: EventId,
+    /// A repository URL, or a setup's coordinate.
     pub url: String,
     pub pubkey: PublicKey,
     pub created_at: u64,
@@ -349,6 +376,19 @@ fn tag_values<'a>(ev: &'a Event, name: &'a str) -> impl Iterator<Item = &'a Tag>
 pub fn read(ev: &Event) -> Option<Seen> {
     let created_at = ev.created_at.as_secs();
     match ev.kind.as_u16() {
+        KIND_REACTION => {
+            if ev.content.trim() == "-" {
+                return None;
+            }
+            let coordinate = tag_value(ev, "a")?;
+            parse_setup_coordinate(coordinate)?;
+            Some(Seen::Like(Like {
+                id: ev.id,
+                url: coordinate.to_string(),
+                pubkey: ev.pubkey,
+                created_at,
+            }))
+        }
         KIND_LIKE => {
             if ev.content.trim() == "-" {
                 return None;
@@ -654,6 +694,31 @@ mod tests {
             )
             .unwrap();
         assert!(read(&other).is_none());
+    }
+
+    #[test]
+    fn setup_likes_point_at_the_coordinate() {
+        let k = keys();
+        let author = keys().public_key();
+        let coord = format!("30490:{}:desk", author.to_hex());
+        let ev = k
+            .sign_event(like_setup(&coord, author, k.public_key()))
+            .unwrap();
+        assert!(matches!(read(&ev), Some(Seen::Like(l)) if l.url == coord));
+        assert!(ev.tags.iter().any(|t| t.as_slice() == ["k", "30490"]));
+        // Reactions to anything else are not ours.
+        let other = k
+            .sign_event(
+                EventBuilder::new(Kind::Custom(KIND_REACTION), "+")
+                    .tag(Tag::custom(
+                        "a",
+                        [format!("30023:{}:post", author.to_hex())],
+                    ))
+                    .finalize_unsigned(k.public_key()),
+            )
+            .unwrap();
+        assert!(read(&other).is_none());
+        assert!(parse_setup_coordinate("30490:nothex:x").is_none());
     }
 
     #[test]

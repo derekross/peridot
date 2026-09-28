@@ -372,7 +372,7 @@ enum Answer {
 /// pairing that hands out a token, `app.sign`/`app.nip44`/`app.status` that
 /// need it, a lock, and a choice of answers.
 /// What Peridot declares to Opal when pairing.
-const DECLARED: [u16; 11] = [30078, 22242, 24242, 0, 3, 5, 13, 17, 1111, 1985, 30490];
+const DECLARED: [u16; 12] = [30078, 22242, 24242, 0, 3, 5, 7, 13, 17, 1111, 1985, 30490];
 
 struct FakeOpal {
     socket: PathBuf,
@@ -1248,6 +1248,28 @@ async fn likes_reviews_and_setups_reach_other_users_ranked_by_trust() {
     let setups = laptop.call("gallery.setups", json!({})).await;
     assert_eq!(setups[0]["coordinate"], json!(coordinate));
     assert_eq!(setups[0]["author"], json!("Derek"));
+    assert_eq!(setups[0]["likes"], json!(0));
+    laptop
+        .call(
+            "gallery.setup.like",
+            json!({"coordinate": coordinate, "on": true}),
+        )
+        .await;
+    let setups = laptop.call("gallery.setups", json!({})).await;
+    assert_eq!(
+        (setups[0]["likes"].clone(), setups[0]["liked"].clone()),
+        (json!(1), json!(true))
+    );
+    let mut liked = false;
+    for _ in 0..100 {
+        let v = desk.call("gallery.setups", json!({})).await;
+        if v[0]["likes"] == json!(1) {
+            liked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(liked, "the desk sees the like on its setup");
     assert_eq!(setups[0]["installed"], json!(0));
     assert_eq!(setups[0]["total"], json!(2));
     // Top of the list: the liked one first, then by stars.

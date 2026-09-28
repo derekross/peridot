@@ -140,6 +140,16 @@ Column {
     })
   }
 
+  function likeSetup(s) {
+    withName(function() {
+      var on = !s.liked
+      svc.run("gallery.setup.like", { coordinate: s.coordinate, on: on }, function() {
+        root.svc.message(on ? "Liked " + s.title : "Like taken back", false)
+        root.reload(true)
+      })
+    })
+  }
+
   function install(item) {
     if (busyUrl !== "") return
     busyUrl = item.url
@@ -704,6 +714,7 @@ Column {
           text: {
             var parts = [modelData.mine ? "You" : modelData.author]
             if (modelData.theme) parts.push(modelData.theme + " theme")
+            parts.push("♥ " + modelData.likes)
             parts.push("Installed " + modelData.installed + " of " + modelData.total)
             if (modelData.following) parts.push("following")
             parts.push(U.ago(modelData.created_at, root.svc ? root.svc.now : 0))
@@ -727,6 +738,12 @@ Column {
         id: setupButtons
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(2)
+        PanelActionButton {
+          visible: !modelData.mine
+          iconText: modelData.liked ? "󰋑" : "󰋕"
+          tooltipText: modelData.liked ? "Unlike" : "Like"
+          onClicked: root.likeSetup(modelData)
+        }
         PanelActionButton {
           visible: modelData.installed < modelData.total || !!modelData.theme
           iconText: root.busyUrl === modelData.coordinate ? "󰑐" : "󰄬"

@@ -17,7 +17,8 @@ use nostr_sdk::prelude::*;
 use opal_kit::signer::sign_within;
 use peridot_sync::gallery::{
     self as proto, ItemKind, KIND_DELETE, KIND_FOLLOWS, KIND_LABEL, KIND_LIKE, KIND_PROFILE,
-    KIND_REVIEW, KIND_SETUP, NAMESPACE, Profile, Review, Seen, Setup, SetupSpec, Wot,
+    KIND_REACTION, KIND_REVIEW, KIND_SETUP, NAMESPACE, Profile, Review, Seen, Setup, SetupSpec,
+    Wot,
 };
 use peridot_sync::signer::IdentitySigner;
 use serde::Serialize;
@@ -84,6 +85,9 @@ pub struct ItemView {
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupView {
     pub coordinate: String,
+    pub likes: usize,
+    pub score: u32,
+    pub liked: bool,
     pub pubkey: String,
     pub author: String,
     pub mine: bool,
@@ -199,6 +203,10 @@ impl Gallery {
         vec![
             Filter::new().kind(Kind::Custom(KIND_LIKE)).since(since),
             Filter::new()
+                .kind(Kind::Custom(KIND_REACTION))
+                .custom_tag(SingleLetterTag::LOWERCASE_K, KIND_SETUP.to_string())
+                .since(since),
+            Filter::new()
                 .kind(Kind::Custom(KIND_REVIEW))
                 .custom_tag(SingleLetterTag::UPPERCASE_K, "web")
                 .since(since),
@@ -213,6 +221,7 @@ impl Gallery {
                     SingleLetterTag::LOWERCASE_K,
                     [
                         KIND_LIKE.to_string(),
+                        KIND_REACTION.to_string(),
                         KIND_REVIEW.to_string(),
                         KIND_SETUP.to_string(),
                     ],
@@ -616,12 +625,14 @@ impl Gallery {
         let authors: Vec<PublicKey> = setups.iter().map(|s| s.pubkey).collect();
         self.fetch_profiles(&authors, false).await;
         let installed = self.installed();
+        let likes = self.store.likes()?;
         let wot = self.wot.read().await;
         let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
         let mut views: Vec<SetupView> = setups
             .into_iter()
             .map(|s: Setup| {
                 let total = s.spec.themes.len() + s.spec.plugins.len();
+                let likers = likes.get(&s.coordinate()).map(Vec::as_slice).unwrap_or(&[]);
                 let have = s
                     .spec
                     .themes
@@ -631,6 +642,9 @@ impl Gallery {
                     .count();
                 SetupView {
                     coordinate: s.coordinate(),
+                    likes: likers.len(),
+                    score: wot.score(likers.iter()),
+                    liked: likers.contains(&self.me),
                     pubkey: s.pubkey.to_hex(),
                     author: self.name_of(&s.pubkey),
                     mine: s.pubkey == self.me,
@@ -649,11 +663,12 @@ impl Gallery {
                 }
             })
             .collect();
-        // Yours first, then people you follow, then newest.
+        // Yours first, then people you follow, then the best liked, then newest.
         views.sort_by(|a, b| {
             b.mine
                 .cmp(&a.mine)
                 .then_with(|| b.following.cmp(&a.following))
+                .then_with(|| b.score.cmp(&a.score))
                 .then_with(|| b.created_at.cmp(&a.created_at))
         });
         Ok(views)
@@ -781,6 +796,9 @@ impl Gallery {
         let total = s.spec.themes.len() + s.spec.plugins.len();
         Ok(SetupView {
             coordinate: s.coordinate(),
+            likes: 0,
+            score: 0,
+            liked: false,
             pubkey: self.me.to_hex(),
             author: self.name_of(&self.me),
             mine: true,
@@ -790,6 +808,26 @@ impl Gallery {
             installed: total,
             total,
         })
+    }
+
+    pub async fn like_setup(&self, coordinate: &str, on: bool) -> anyhow::Result<()> {
+        let (author, _) =
+            proto::parse_setup_coordinate(coordinate).context("that isn't a setup")?;
+        let mine = self.store.my_like(coordinate, &self.me)?;
+        match (on, mine) {
+            (true, Some(_)) | (false, None) => Ok(()),
+            (true, None) => {
+                self.publish(proto::like_setup(coordinate, author, self.me))
+                    .await?;
+                Ok(())
+            }
+            (false, Some(id)) => {
+                self.publish(proto::delete(&[(id, KIND_REACTION)], self.me))
+                    .await?;
+                self.store.delete(&self.me, &[id])?;
+                Ok(())
+            }
+        }
     }
 
     pub async fn remove_setup(&self, coordinate: &str) -> anyhow::Result<()> {
