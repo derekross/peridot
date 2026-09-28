@@ -17,7 +17,31 @@ const PLUGINS_SITE: &str = "https://plugins.omarchy.org/";
 
 pub const FETCH_TIMEOUT: Duration = Duration::from_secs(90);
 /// Refuse anything bigger (the plugin catalogue is about 11 MB today).
-const MAX_BYTES: usize = 64 * 1024 * 1024;
+/// The body is read in pieces and dropped as soon as it passes this, so a
+/// server can't fill memory whatever it claims in Content-Length.
+const MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// A catalogue address Peridot will read: https, or plain http on this
+/// computer (a local copy for development and tests).
+pub fn allowed_url(url: &str) -> bool {
+    url.starts_with("https://") || is_loopback_http(url)
+}
+
+/// `http://127.0.0.1…`, `http://localhost…`, `http://[::1]…`.
+pub fn is_loopback_http(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => authority.rsplit_once(':').map_or(authority, |(h, _)| h),
+    };
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
 
 /// Fetch `url` unless it hasn't changed since `etag`. Ok(None) = unchanged.
 pub async fn fetch(
@@ -25,6 +49,19 @@ pub async fn fetch(
     url: &str,
     etag: Option<&str>,
 ) -> anyhow::Result<Option<(Vec<u8>, Option<String>)>> {
+    fetch_capped(http, url, etag, MAX_BYTES).await
+}
+
+async fn fetch_capped(
+    http: &reqwest::Client,
+    url: &str,
+    etag: Option<&str>,
+    max: usize,
+) -> anyhow::Result<Option<(Vec<u8>, Option<String>)>> {
+    anyhow::ensure!(
+        allowed_url(url),
+        "{url}: catalogues are read over https only"
+    );
     let mut req = http.get(url).header("Accept", "application/json");
     if let Some(e) = etag {
         req = req.header("If-None-Match", e);
@@ -41,14 +78,26 @@ pub async fn fetch(
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    if res.content_length().is_some_and(|n| n as usize > MAX_BYTES) {
-        anyhow::bail!("{url}: too big");
+    let body = read_capped(res, max)
+        .await
+        .map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+    Ok(Some((body, etag)))
+}
+
+/// The body of a response, refused as soon as it goes past `max` bytes
+/// (whatever Content-Length said, or didn't).
+pub async fn read_capped(mut res: reqwest::Response, max: usize) -> anyhow::Result<Vec<u8>> {
+    if res.content_length().is_some_and(|n| n > max as u64) {
+        anyhow::bail!("too big");
     }
-    let body = res.bytes().await?;
-    if body.len() > MAX_BYTES {
-        anyhow::bail!("{url}: too big");
+    let mut out = Vec::with_capacity(res.content_length().unwrap_or(0).min(max as u64) as usize);
+    while let Some(chunk) = res.chunk().await? {
+        if out.len() + chunk.len() > max {
+            anyhow::bail!("too big");
+        }
+        out.extend_from_slice(&chunk);
     }
-    Ok(Some((body.to_vec(), etag)))
+    Ok(out)
 }
 
 // ── Plugins ─────────────────────────────────────────────────────────
@@ -229,6 +278,75 @@ pub async fn refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One response per connection: a status line, optional Content-Length,
+    /// then `body`.
+    async fn serve(body: Vec<u8>, with_length: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                let body = body.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let _ = s.read(&mut buf).await;
+                    let mut head = String::from(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"v9\"\r\nConnection: close\r\n",
+                    );
+                    if with_length {
+                        head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                    }
+                    head.push_str("\r\n");
+                    let _ = s.write_all(head.as_bytes()).await;
+                    let _ = s.write_all(&body).await;
+                    let _ = s.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn bodies_are_capped_whatever_the_headers_say() {
+        opal_core::identity::ensure_crypto_provider();
+        let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let body = vec![b'x'; 1000];
+        // Announced and too big: refused before reading.
+        let base = serve(body.clone(), true).await;
+        let e = fetch_capped(&http, &base, None, 500).await.unwrap_err();
+        assert!(e.to_string().contains("too big"), "{e}");
+        // Unannounced and too big: refused while reading.
+        let base = serve(body.clone(), false).await;
+        let e = fetch_capped(&http, &base, None, 500).await.unwrap_err();
+        assert!(e.to_string().contains("too big"), "{e}");
+        // Within the cap: the body and its ETag.
+        let base = serve(body.clone(), false).await;
+        let (got, etag) = fetch_capped(&http, &base, None, 1000)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, body);
+        assert_eq!(etag.as_deref(), Some("\"v9\""));
+        // Only https, or this computer over http.
+        let e = fetch_capped(&http, "http://plugins.omarchy.org/catalog.json", None, 1000)
+            .await
+            .unwrap_err();
+        assert!(e.to_string().contains("https only"), "{e}");
+        assert!(allowed_url("https://plugins.omarchy.org/catalog.json"));
+        assert!(allowed_url("http://127.0.0.1:8080/plugins"));
+        assert!(allowed_url("http://localhost:8080/plugins"));
+        assert!(allowed_url("http://[::1]:8080/plugins"));
+        assert!(!allowed_url("http://10.0.0.1/plugins"));
+        assert!(!allowed_url("http://127.0.0.1.evil.example/plugins"));
+        assert!(!allowed_url("ftp://127.0.0.1/plugins"));
+    }
 
     #[test]
     fn reads_both_catalogues() {

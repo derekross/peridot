@@ -101,8 +101,70 @@ impl AsyncNip44 for Adapter {
     }
 }
 
+/// Whether `host` names something on the public internet: not a literal
+/// IP address, not localhost or a LAN-style name. Lists published by
+/// other people (inbox relays, NIP-05 sites) are only followed to such
+/// hosts, so a list can't point this computer at its own network.
+pub fn is_public_host(host: &str) -> bool {
+    let host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
+    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    if host == "localhost" || !host.contains('.') {
+        return false;
+    }
+    ![
+        ".localhost",
+        ".local",
+        ".internal",
+        ".lan",
+        ".home.arpa",
+        ".onion",
+    ]
+    .iter()
+    .any(|suffix| host.ends_with(suffix))
+}
+
+/// Loopback, private, link-local and other addresses that aren't on the
+/// public internet (what a host may resolve to).
+pub fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                // Carrier-grade NAT (100.64.0.0/10), also Tailscale's range.
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(std::net::IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
+}
+
+/// A relay someone else's list may send us to: `wss://`, on a public host.
+fn keep_relay(url: &RelayUrl) -> bool {
+    url.as_str_without_trailing_slash().starts_with("wss://")
+        && url.domain().is_some_and(is_public_host)
+}
+
 /// Where someone receives private messages: their kind 10050 list, else
-/// their NIP-65 read relays, else `fallback`.
+/// their NIP-65 read relays, else `fallback`. Only `wss://` relays on
+/// public hosts are taken from their lists.
 pub async fn inbox_relays(client: &Client, who: PublicKey, fallback: &[RelayUrl]) -> Vec<RelayUrl> {
     let filter = Filter::new()
         .author(who)
@@ -135,6 +197,7 @@ pub async fn inbox_relays(client: &Client, who: PublicKey, fallback: &[RelayUrl]
             inbox = opal_kit::relays::RelayList::from_event(ev).read;
         }
     }
+    inbox.retain(keep_relay);
     inbox.truncate(5);
     if inbox.is_empty() {
         fallback.to_vec()
@@ -177,5 +240,113 @@ mod tests {
             "the same message, kept for me"
         );
         assert!(nip59::extract_rumor(&Keys::generate(), &w.to_them).is_err());
+    }
+
+    #[test]
+    fn public_hosts_and_private_addresses() {
+        for h in [
+            "relay.damus.io",
+            "nos.lol",
+            "purplepag.es",
+            "a.b.example.co.uk",
+        ] {
+            assert!(is_public_host(h), "{h}");
+        }
+        for h in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "::1",
+            "[::1]",
+            "fe80::1",
+            "relay",
+            "nas.local",
+            "router.lan",
+            "svc.internal",
+            "x.localhost",
+            "x.home.arpa",
+            "",
+        ] {
+            assert!(!is_public_host(h), "{h}");
+        }
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.0.1",
+            "169.254.169.254",
+            "100.100.1.1",
+            "0.0.0.0",
+            "::1",
+            "::",
+            "fd00::1",
+            "fe80::1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
+            assert!(!is_private_ip(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_public_wss_relays_are_taken_from_someones_list() {
+        let relay = loop {
+            if let Ok(r) = MockRelay::run().await {
+                break r;
+            }
+        };
+        let url = relay.url().await;
+        let them = Keys::generate();
+        let client = Client::default();
+        client.add_relay(&url).await.unwrap();
+        client
+            .connect()
+            .and_wait(std::time::Duration::from_secs(3))
+            .await;
+        let listed = [
+            "ws://relay.example.com",
+            "wss://127.0.0.1:7777",
+            "wss://localhost",
+            "wss://10.0.0.2",
+            "wss://[::1]:4443",
+            "wss://nas.local",
+            "wss://inbox.example.com",
+        ];
+        let mut b = EventBuilder::new(Kind::InboxRelays, "");
+        for r in listed {
+            b = b.tag(Tag::parse(["relay", r]).unwrap());
+        }
+        let ev = them
+            .sign_event(b.finalize_unsigned(them.public_key()))
+            .unwrap();
+        client.send_event(&ev).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let fallback = [RelayUrl::parse("wss://fallback.example.com").unwrap()];
+        let inbox = inbox_relays(&client, them.public_key(), &fallback).await;
+        assert_eq!(
+            inbox,
+            [RelayUrl::parse("wss://inbox.example.com").unwrap()],
+            "the one public wss relay"
+        );
+        // A list with nothing usable falls back.
+        let other = Keys::generate();
+        let ev = other
+            .sign_event(
+                EventBuilder::new(Kind::InboxRelays, "")
+                    .tag(Tag::parse(["relay", "ws://127.0.0.1:7777"]).unwrap())
+                    .finalize_unsigned(other.public_key()),
+            )
+            .unwrap();
+        client.send_event(&ev).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert_eq!(
+            inbox_relays(&client, other.public_key(), &fallback).await,
+            fallback
+        );
+        client.shutdown().await;
     }
 }

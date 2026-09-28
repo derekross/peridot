@@ -191,6 +191,38 @@ pub fn listing(url: &str, kind: ItemKind, name: &str, pubkey: PublicKey) -> Unsi
         .finalize_unsigned(pubkey)
 }
 
+/// A setup lists at most this many themes and plugins together; the rest
+/// of a longer list is ignored when read.
+pub const MAX_SETUP_ITEMS: usize = 10;
+
+/// Where a setup's screenshot may be hosted. Anything else is dropped, so
+/// a setup can't make every reader fetch from an address of its choosing.
+pub const IMAGE_HOSTS: &[&str] = &[
+    "blossom.ditto.pub",
+    "blossom.dreamith.to",
+    "nostr.download",
+    "blossom.yakihonne.com",
+    "files.sovbit.host",
+    "cdn.hzrd149.com",
+    "image.nostr.build",
+    "i.nostr.build",
+    "nostr.build",
+];
+
+/// An https address on one of [`IMAGE_HOSTS`], with no credentials or
+/// port in it.
+pub fn allowed_image(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    url.len() < 300 && IMAGE_HOSTS.contains(&authority.as_str())
+}
+
 /// What a setup is made of.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupSpec {
@@ -458,11 +490,14 @@ pub fn read(ev: &Event) -> Option<Seen> {
                     .filter(|t| crate::sync::valid_name(t))
                     .map(String::from),
                 image: tag_value(ev, "image")
-                    .filter(|u| u.starts_with("https://") && u.len() < 300)
+                    .filter(|u| allowed_image(u))
                     .map(String::from),
                 ..Default::default()
             };
             for t in tag_values(ev, "r") {
+                if spec.themes.len() + spec.plugins.len() >= MAX_SETUP_ITEMS {
+                    break;
+                }
                 let s = t.as_slice();
                 let (Some(url), Some(what)) = (s.get(1), s.get(2)) else {
                     continue;
@@ -733,7 +768,7 @@ mod tests {
                 "https://github.com/derekross/omarchy-calendar".into(),
                 "https://github.com/derekross/omarchy-calendar".into(),
             ],
-            image: Some("https://blossom.example/abc.png".into()),
+            image: Some("https://image.nostr.build/abc.png".into()),
         };
         let ev = k
             .sign_event(setup(&spec, &slug(&spec.title), k.public_key()))
@@ -754,6 +789,51 @@ mod tests {
         }
         assert_eq!(slug("  !!  "), "setup");
         assert_eq!(slug("Ünïcode → Desk"), "n-code-desk");
+        // A screenshot elsewhere is dropped; the setup stays.
+        for bad in [
+            "https://blossom.example/abc.png",
+            "http://image.nostr.build/abc.png",
+            "https://image.nostr.build.evil.example/abc.png",
+            "https://evil.example/image.nostr.build/abc.png",
+            "https://user@image.nostr.build/abc.png",
+            "https://image.nostr.build:8443/abc.png",
+        ] {
+            let ev = k
+                .sign_event(setup(
+                    &SetupSpec {
+                        image: Some(bad.into()),
+                        ..spec.clone()
+                    },
+                    "x",
+                    k.public_key(),
+                ))
+                .unwrap();
+            match read(&ev) {
+                Some(Seen::Setup(s)) => assert_eq!(s.spec.image, None, "{bad}"),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(allowed_image("https://nostr.build/i/abc.png"));
+        assert!(allowed_image("https://Blossom.Ditto.Pub/abc.png"));
+        // At most ten themes and plugins together; the first ten stay.
+        let many = SetupSpec {
+            themes: (0..7)
+                .map(|i| format!("https://github.com/x/omarchy-t{i}-theme"))
+                .collect(),
+            plugins: (0..7)
+                .map(|i| format!("https://github.com/x/omarchy-p{i}"))
+                .collect(),
+            ..Default::default()
+        };
+        let ev = k.sign_event(setup(&many, "many", k.public_key())).unwrap();
+        match read(&ev) {
+            Some(Seen::Setup(s)) => {
+                assert_eq!(s.spec.themes.len() + s.spec.plugins.len(), MAX_SETUP_ITEMS);
+                assert_eq!(s.spec.themes, many.themes);
+                assert_eq!(s.spec.plugins, many.plugins[..3]);
+            }
+            other => panic!("{other:?}"),
+        }
         // A setup that lists nothing is noise.
         let empty = k
             .sign_event(setup(

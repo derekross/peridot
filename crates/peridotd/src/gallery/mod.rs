@@ -118,9 +118,17 @@ pub struct ReviewView {
 impl Gallery {
     pub fn new(p: GalleryParams) -> anyhow::Result<Self> {
         opal_core::identity::ensure_crypto_provider();
+        // https only, and no following of redirects: a catalogue lives
+        // where it's configured. A local copy over http (development,
+        // tests) is the one exception; registry::fetch checks each URL.
+        let local_catalogue = [&p.plugins_url, &p.themes_url]
+            .into_iter()
+            .any(|u| registry::is_loopback_http(u));
         let http = reqwest::Client::builder()
             .timeout(registry::FETCH_TIMEOUT)
             .user_agent(format!("peridot/{}", env!("CARGO_PKG_VERSION")))
+            .redirect(reqwest::redirect::Policy::none())
+            .https_only(!local_catalogue)
             .build()?;
         Ok(Self {
             me: p.signer.pubkey(),
@@ -972,6 +980,27 @@ pub enum Step {
     InstallTheme(String),
     InstallPlugin(String),
     SwitchTheme(String),
+}
+
+/// A step as the panel names it when asking for one to run.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct StepIn {
+    pub kind: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl StepIn {
+    pub fn matches(&self, step: &Step) -> bool {
+        let url = self.url.as_deref().and_then(proto::canonical_url);
+        match step {
+            Step::InstallTheme(u) => self.kind == "install_theme" && url.as_deref() == Some(u),
+            Step::InstallPlugin(u) => self.kind == "install_plugin" && url.as_deref() == Some(u),
+            Step::SwitchTheme(n) => self.kind == "switch_theme" && self.name.as_deref() == Some(n),
+        }
+    }
 }
 
 fn gallery_sign_err(e: peridot_sync::signer::SignError) -> anyhow::Error {
