@@ -150,9 +150,10 @@ impl Identity {
 
     /// The root event: the sync secret, NIP-44 encrypted to ourselves.
     pub async fn root_event(&self, signer: &dyn IdentitySigner) -> anyhow::Result<Event> {
-        let body = serde_json::to_string(&Root {
+        let hex = self.secret.to_hex();
+        let body = serde_json::to_string(&RootRef {
             v: 1,
-            sync_secret: self.secret.to_hex(),
+            sync_secret: &hex,
         })?;
         let content = signer.nip44_self_encrypt(body).await?;
         let unsigned = EventBuilder::new(Kind::Custom(DATA_KIND), content)
@@ -175,18 +176,30 @@ impl Identity {
             "not a Peridot root event"
         );
         anyhow::ensure!(root.verify().is_ok(), "the root event isn't validly signed");
-        let body = signer.nip44_self_decrypt(root.content.clone()).await?;
-        let root: Root = serde_json::from_str(&body)?;
+        let mut body = signer.nip44_self_decrypt(root.content.clone()).await?;
+        let mut root: Root = serde_json::from_str(&body)?;
+        let secret = SyncSecret::from_hex(&root.sync_secret);
+        zeroize::Zeroize::zeroize(&mut root.sync_secret);
+        zeroize::Zeroize::zeroize(&mut body);
         Ok(Self {
             pubkey,
             keys,
-            secret: SyncSecret::from_hex(&root.sync_secret)?,
+            secret: secret?,
         })
     }
 }
 
-#[derive(Serialize, Deserialize)]
+/// The root event's body, borrowed for writing…
+#[derive(Serialize)]
+struct RootRef<'a> {
+    v: u8,
+    sync_secret: &'a str,
+}
+
+/// …and owned when read (wiped by hand: no serde for `Zeroizing` here).
+#[derive(Deserialize)]
 struct Root {
+    #[allow(dead_code)]
     v: u8,
     sync_secret: String,
 }
@@ -225,7 +238,7 @@ mod tests {
         let signer = LocalSigner(keys.clone());
         let root = id.root_event(&signer).await.unwrap();
         assert!(root.verify().is_ok());
-        assert!(!root.content.contains(&id.secret.to_hex()));
+        assert!(!root.content.contains(id.secret.to_hex().as_str()));
         let back = Identity::from_root(id.pubkey(), Some(keys), &signer, &root)
             .await
             .unwrap();

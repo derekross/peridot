@@ -11,7 +11,7 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use opal_core::nostr::nips::nip44::v2::{self, ConversationKey};
 use sha2::{Digest, Sha256};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// 32 random bytes shared by all of a person's devices.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
@@ -30,8 +30,10 @@ impl SyncSecret {
         Ok(Self(arr))
     }
 
-    pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+    /// The secret as hex, wiped when dropped. Callers borrow it (`&*`,
+    /// `.as_str()`) rather than copying it out.
+    pub fn to_hex(&self) -> Zeroizing<String> {
+        Zeroizing::new(hex::encode(self.0))
     }
 
     /// The working keys for this secret.
