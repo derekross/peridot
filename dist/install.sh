@@ -178,6 +178,15 @@ case $INSTALL_UNIT_STATE in
   foreign) stop "$INSTALL_UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
 esac
 
+inspect_proxy_unit
+PROXY_UNIT_HASH="$(file_hash "$PROXY_UNIT")"
+case $PROXY_UNIT_STATE in
+  elsewhere) stop "peridot-dbus-proxy.service is already provided by $PROXY_UNIT_FRAGMENT; installing Peridot's would shadow it. Remove or rename that unit first." ;;
+  symlink) stop "$PROXY_UNIT is a symbolic link (masked or linked). Peridot won't replace it; unmask or unlink it, then run this again." ;;
+  other) stop "$PROXY_UNIT exists and isn't a regular file. Move it aside, then run this again." ;;
+  foreign) stop "$PROXY_UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
+esac
+
 inspect_menu
 
 PLUGIN_STATE="$(plugin_dir_state "$PLUGIN_PATH")"
@@ -250,15 +259,27 @@ case $UNIT_STATE in
 esac
 (( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
 
-# The template that runs Omarchy installs outside the daemon's sandbox.
-INSTALL_UNIT_WRITTEN=0
+# The bus proxy peridot.service is bound to (so it must be in place before
+# the service is started), and the template that runs Omarchy installs
+# outside the daemon's sandbox.
+AUX_UNITS_WRITTEN=0
+case $PROXY_UNIT_STATE in
+  missing)
+    say "Installing the bus proxy unit"
+    replace_owned "dist/peridot-dbus-proxy.service" "$PROXY_UNIT" 644 "" && AUX_UNITS_WRITTEN=1 ;;
+  owned)
+    say "Updating the bus proxy unit"
+    replace_owned "dist/peridot-dbus-proxy.service" "$PROXY_UNIT" 644 "$PROXY_UNIT_HASH" && AUX_UNITS_WRITTEN=1 ;;
+  edited)
+    say "Keeping your $PROXY_UNIT (you changed it; Peridot's version isn't installed)" ;;
+esac
 case $INSTALL_UNIT_STATE in
   missing)
     say "Installing the install template unit"
-    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "" && INSTALL_UNIT_WRITTEN=1 ;;
+    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "" && AUX_UNITS_WRITTEN=1 ;;
   owned)
     say "Updating the install template unit"
-    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "$INSTALL_UNIT_HASH" && INSTALL_UNIT_WRITTEN=1 ;;
+    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "$INSTALL_UNIT_HASH" && AUX_UNITS_WRITTEN=1 ;;
   edited)
     say "Keeping your $INSTALL_UNIT (you changed it; Peridot's version isn't installed)" ;;
 esac
@@ -295,7 +316,7 @@ case $UNIT_STATE in
     else
       say "peridot.service isn't running; not started (start it with: systemctl --user start peridot.service)."
     fi ;;
-  *) (( INSTALL_UNIT_WRITTEN )) && systemctl_user daemon-reload ;;
+  *) (( AUX_UNITS_WRITTEN )) && systemctl_user daemon-reload ;;
 esac
 
 case $MENU_STATE in

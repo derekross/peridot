@@ -1,0 +1,62 @@
+# Installed by Peridot (https://github.com/derekross/peridot); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
+[Unit]
+Description=Peridot: the session bus, filtered down to what peridotd may ask
+Documentation=https://github.com/derekross/peridot
+# Stopped and restarted with peridot.service, and starts it again after
+# a restart of its own (peridot.service is bound to this one).
+PartOf=peridot.service
+Wants=peridot.service
+
+[Service]
+Type=simple
+# A second socket in front of the real bus. peridotd sees only this one:
+# the keyring, desktop notifications, and of systemd exactly what
+# `systemctl start --wait peridot-install@…` needs (StartUnit, GetUnit,
+# a reference on the unit, the JobRemoved signal). It can't define a unit
+# of its own (StartTransientUnit), stop or change one, or talk to anything
+# else on the bus.
+RuntimeDirectory=peridot
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/xdg-dbus-proxy ${DBUS_SESSION_BUS_ADDRESS} %t/peridot/bus \
+  --filter \
+  --talk=org.freedesktop.secrets \
+  --talk=org.freedesktop.Notifications \
+  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.StartUnit@/org/freedesktop/systemd1 \
+  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.GetUnit@/org/freedesktop/systemd1 \
+  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Unit.Ref@/org/freedesktop/systemd1/unit/* \
+  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Unit.Unref@/org/freedesktop/systemd1/unit/* \
+  --broadcast=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.JobRemoved@/org/freedesktop/systemd1
+# "Started" only once the socket is there, so peridot.service (After=) can
+# rely on it.
+ExecStartPost=/usr/bin/sh -c 'for i in $(seq 100); do [ -S %t/peridot/bus ] && exit 0; sleep 0.05; done; exit 1'
+Restart=always
+RestartSec=1
+
+# Hardening for the proxy itself: it needs the real bus and %t, nothing
+# else.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+# read-only, not yes: "yes" hides /run/user, where its socket lives.
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+UMask=0077

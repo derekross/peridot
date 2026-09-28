@@ -5,9 +5,16 @@ Description=Peridot: keeps your Omarchy computers matching
 Documentation=https://github.com/derekross/peridot
 PartOf=graphical-session.target
 After=graphical-session.target
+# The session bus reaches this service only through peridot-dbus-proxy
+# (see that unit): the keyring, notifications, and starting an install.
+# Bound to it: the keyring connection is made once, so if the proxy ever
+# goes away this service stops with it and is started again with it.
+BindsTo=peridot-dbus-proxy.service
+After=peridot-dbus-proxy.service
 
 [Service]
 Type=simple
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/peridot/bus
 ExecStart=%h/.local/bin/peridotd
 Restart=on-failure
 RestartSec=3
@@ -16,9 +23,12 @@ RestartSec=3
 # except for the places Peridot writes: the settings it syncs (under
 # ~/.config, plus ~/.XCompose and ~/.bashrc if you sync them), its own data,
 # its socket, and your Documents folder for the recovery kit. It needs the
-# session bus (keyring, and asking systemd to run an install) and the
-# network. Installing a theme or plugin you accepted runs as
-# peridot-install@.service, outside this sandbox.
+# network, and the session bus for the keyring, notifications and asking
+# systemd to run an install; it gets the bus through peridot-dbus-proxy,
+# which lets exactly those through, and the real bus and systemd's own
+# socket are hidden from it, so even code that took this process over
+# couldn't define a unit of its own. Installing a theme or plugin you
+# accepted runs as peridot-install@.service, outside this sandbox.
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -41,6 +51,10 @@ ReadWritePaths=-%h/.local/share/peridot -%h/.cache/peridot
 # The control socket, and the recovery kit page.
 ReadWritePaths=%t
 ReadWritePaths=-%h/Documents
+# The real session bus and systemd's private socket: the proxy's socket is
+# the only way to either. (systemctl falls back from the private socket to
+# the bus when it can't open it.)
+InaccessiblePaths=-%t/bus -%t/systemd/private
 # Inside ~/.config, what Peridot never writes: where the session starts
 # programs from, and the folders manifest.rs never syncs. Skipped when
 # absent.

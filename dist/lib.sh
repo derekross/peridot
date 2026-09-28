@@ -34,6 +34,7 @@ BINDIR="$HOME/.local/bin"
 UNITDIR="$CONFIG_HOME/systemd/user"            # systemd honours XDG_CONFIG_HOME
 UNIT="$UNITDIR/peridot.service"
 INSTALL_UNIT="$UNITDIR/peridot-install@.service"   # runs Omarchy installs outside the daemon's sandbox
+PROXY_UNIT="$UNITDIR/peridot-dbus-proxy.service"   # the session bus, filtered, for peridotd (it is bound to this)
 INSTALLER="$BINDIR/peridot-install"                # what that template unit runs
 PLUGINDIR="$HOME/.config/omarchy/plugins"      # where Omarchy itself looks
 MENU="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"   # Omarchy's, not XDG
@@ -149,6 +150,7 @@ load_known() {
   # This checkout counts too (an install made from it without a record).
   KNOWN["$(file_hash dist/peridot.service)"$'\t'unit]=checkout
   KNOWN["$(file_hash dist/peridot-install@.service)"$'\t'install-unit]=checkout
+  KNOWN["$(file_hash dist/peridot-dbus-proxy.service)"$'\t'proxy-unit]=checkout
   KNOWN["$(file_hash dist/peridot-install)"$'\t'bin/peridot-install]=checkout
   while IFS= read -r -d '' f; do
     [[ ${f#shell-plugin/} == manifest.json ]] && continue
@@ -455,25 +457,40 @@ inspect_unit() {
 unit_runs_our_binary() { [[ $UNIT_EXECSTART == *"$BINDIR/peridotd"* ]]; }
 unit_is_active() { systemctl --user is-active --quiet peridot.service 2>/dev/null; }
 
-# The install template unit (peridot-install@.service), the same way.
-INSTALL_UNIT_KIND=missing INSTALL_UNIT_STATE=missing INSTALL_UNIT_FRAGMENT=
-inspect_install_unit() {
-  INSTALL_UNIT_KIND="$(path_kind "$INSTALL_UNIT")"
-  # (systemctl show wants an instance; any name finds the template.)
-  local show
-  show="$(systemctl --user show -p FragmentPath 'peridot-install@peridot.service' 2>/dev/null || true)"
-  INSTALL_UNIT_FRAGMENT="$(printf '%s\n' "$show" | awk -F= '$1 == "FragmentPath" { print substr($0, 14) }')"
-  case $INSTALL_UNIT_KIND in
+# The other two units, the same way: aux_unit_state <path> <name systemd
+# knows it by> <logical path> leaves the state in AUX_STATE (missing |
+# owned | edited | foreign | symlink | elsewhere | other) and where systemd
+# loads it from in AUX_FRAGMENT.
+AUX_STATE=missing AUX_FRAGMENT=
+aux_unit_state() {
+  local path=$1 name=$2 logical=$3 show kind
+  kind="$(path_kind "$path")"
+  show="$(systemctl --user show -p FragmentPath "$name" 2>/dev/null || true)"
+  AUX_FRAGMENT="$(printf '%s\n' "$show" | awk -F= '$1 == "FragmentPath" { print substr($0, 14) }')"
+  case $kind in
     missing)
-      if [[ -n $INSTALL_UNIT_FRAGMENT && $INSTALL_UNIT_FRAGMENT != /dev/null ]]; then INSTALL_UNIT_STATE=elsewhere; else INSTALL_UNIT_STATE=missing; fi ;;
-    symlink) INSTALL_UNIT_STATE=symlink ;;
-    dir | other) INSTALL_UNIT_STATE=other ;;
+      if [[ -n $AUX_FRAGMENT && $AUX_FRAGMENT != /dev/null ]]; then AUX_STATE=elsewhere; else AUX_STATE=missing; fi ;;
+    symlink) AUX_STATE=symlink ;;
+    dir | other) AUX_STATE=other ;;
     file)
-      if [[ -n $INSTALL_UNIT_FRAGMENT && $INSTALL_UNIT_FRAGMENT != "$INSTALL_UNIT" && $INSTALL_UNIT_FRAGMENT != /dev/null ]]; then INSTALL_UNIT_STATE=elsewhere
-      elif owned_file "$INSTALL_UNIT" install-unit; then INSTALL_UNIT_STATE=owned
-      elif grep -qF -- "$PERIDOT_URL" "$INSTALL_UNIT"; then INSTALL_UNIT_STATE=edited
-      else INSTALL_UNIT_STATE=foreign; fi ;;
+      if [[ -n $AUX_FRAGMENT && $AUX_FRAGMENT != "$path" && $AUX_FRAGMENT != /dev/null ]]; then AUX_STATE=elsewhere
+      elif owned_file "$path" "$logical"; then AUX_STATE=owned
+      elif grep -qF -- "$PERIDOT_URL" "$path"; then AUX_STATE=edited
+      else AUX_STATE=foreign; fi ;;
   esac
+}
+# The install template (peridot-install@.service). systemctl show wants an
+# instance; any name finds the template.
+INSTALL_UNIT_STATE=missing INSTALL_UNIT_FRAGMENT=
+inspect_install_unit() {
+  aux_unit_state "$INSTALL_UNIT" 'peridot-install@peridot.service' install-unit
+  INSTALL_UNIT_STATE=$AUX_STATE INSTALL_UNIT_FRAGMENT=$AUX_FRAGMENT
+}
+# The bus proxy (peridot-dbus-proxy.service) peridot.service is bound to.
+PROXY_UNIT_STATE=missing PROXY_UNIT_FRAGMENT=
+inspect_proxy_unit() {
+  aux_unit_state "$PROXY_UNIT" peridot-dbus-proxy.service proxy-unit
+  PROXY_UNIT_STATE=$AUX_STATE PROXY_UNIT_FRAGMENT=$AUX_FRAGMENT
 }
 
 # binary_state <path>: missing | symlink | other | owned | unrecorded
@@ -726,7 +743,7 @@ PINNED_COMMIT=
 print_paths() {
   say "Paths:"
   note "binaries  $BINDIR/peridotd, $BINDIR/peridot, $INSTALLER"
-  note "services  $UNIT, $INSTALL_UNIT"
+  note "services  $UNIT, $PROXY_UNIT, $INSTALL_UNIT"
   note "plugin    $PLUGIN_PATH"
   note "menu      $MENU"
   note "record    $MANIFEST$( [[ -f $MANIFEST ]] || printf ' (none yet)')"

@@ -12,7 +12,8 @@
 #
 # Line format: <sha256>\t<label>\t<logical path>, tab-separated. Logical
 # paths: `unit` (dist/peridot.service), `install-unit`
-# (dist/peridot-install@.service), `bin/peridot-install` (the install
+# (dist/peridot-install@.service), `proxy-unit`
+# (dist/peridot-dbus-proxy.service), `bin/peridot-install` (the install
 # script), `plugin/<file>` (what the plugin copy holds; manifest.json as
 # install.sh renders it), `plugin/.installed-by-peridot` (the marker earlier
 # installs wrote). The label is the tag or version+commit
@@ -37,6 +38,9 @@ ref_lines() {
   if git cat-file -e "$ref:dist/peridot-install" 2>/dev/null; then
     printf '%s\t%s\t%s\n' "$(git show "$ref:dist/peridot-install" | hash_stdin)" "$label" bin/peridot-install
   fi
+  if git cat-file -e "$ref:dist/peridot-dbus-proxy.service" 2>/dev/null; then
+    printf '%s\t%s\t%s\n' "$(git show "$ref:dist/peridot-dbus-proxy.service" | hash_stdin)" "$label" proxy-unit
+  fi
   while IFS= read -r path; do
     rel=${path#shell-plugin/}
     [[ $rel == manifest.json ]] && continue
@@ -57,6 +61,7 @@ tree_lines() {
   printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot.service)" "$label" unit
   printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot-install@.service)" "$label" install-unit
   printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot-install)" "$label" bin/peridot-install
+  printf '%s\t%s\t%s\n' "$(hash_stdin <dist/peridot-dbus-proxy.service)" "$label" proxy-unit
   while IFS= read -r -d '' path; do
     rel=${path#shell-plugin/}
     [[ $rel == manifest.json ]] && continue
@@ -79,7 +84,7 @@ ref_label() {
 
 generate() {
   {
-    for ref in $(git rev-list --reverse "$FIRST^..HEAD" -- shell-plugin manifest.json dist/peridot.service dist/peridot-install@.service dist/peridot-install) \
+    for ref in $(git rev-list --reverse "$FIRST^..HEAD" -- shell-plugin manifest.json dist/peridot.service dist/peridot-install@.service dist/peridot-install dist/peridot-dbus-proxy.service) \
                $(git tag -l 'v*'); do
       ref_lines "$ref" "$(ref_label "$ref")"
     done

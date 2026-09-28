@@ -9,7 +9,7 @@ FAILS=0
 fresh() {
   export HOME; HOME="$(mktemp -d)"
   unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
-  export FAKE_LOG="$HOME/calls.log" FAKE_ACTIVE_RC=3 FAKE_FRAGMENT="" FAKE_EXECSTART="" FAKE_MIME="" FAKE_SECRET_RC=0
+  export FAKE_LOG="$HOME/calls.log" FAKE_ACTIVE_RC=3 FAKE_FRAGMENT="" FAKE_INSTALL_FRAGMENT="" FAKE_PROXY_FRAGMENT="" FAKE_EXECSTART="" FAKE_MIME="" FAKE_SECRET_RC=0
   export FAKE_SECRETS="$HOME/fake-secrets"
   printf 'device-identity d1\nsync-secret s1\n' >"$FAKE_SECRETS"
   mkdir -p "$HOME/.config/omarchy/plugins" "$HOME/.local/bin"

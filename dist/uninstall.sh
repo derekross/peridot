@@ -45,7 +45,7 @@ print_paths
 # anything else.
 for p in "${!MANIFEST_HASH[@]}"; do
   case $p in
-    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$INSTALLER" | "$UNIT" | "$INSTALL_UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
+    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$INSTALLER" | "$UNIT" | "$PROXY_UNIT" | "$INSTALL_UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
     *) note "ignoring a record line for $p: not a path this script writes"; unset 'MANIFEST_HASH[$p]' ;;
   esac
 done
@@ -80,6 +80,24 @@ case $UNIT_STATE in
   missing) ;;
 esac
 (( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
+
+# The bus proxy: stopped once the service is (PartOf= stops it with the
+# service; this covers a service that wasn't Peridot's to stop).
+inspect_proxy_unit
+case $PROXY_UNIT_STATE in
+  owned)
+    systemctl_user stop peridot-dbus-proxy.service
+    remove_owned "$PROXY_UNIT" "$(file_hash "$PROXY_UNIT")"
+    systemctl_user daemon-reload ;;
+  edited)
+    systemctl_user stop peridot-dbus-proxy.service
+    note "$PROXY_UNIT is kept: you changed it. Only peridot.service uses it; remove it yourself when you're done with it." ;;
+  elsewhere) note "peridot-dbus-proxy.service comes from $PROXY_UNIT_FRAGMENT; not Peridot's, leaving it alone." ;;
+  symlink) note "$PROXY_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
+  foreign) note "$PROXY_UNIT isn't Peridot's; leaving it alone." ;;
+  other) note "$PROXY_UNIT isn't a regular file; leaving it alone." ;;
+  missing) ;;
+esac
 
 # The install template: any instance still running is stopped with it.
 inspect_install_unit
