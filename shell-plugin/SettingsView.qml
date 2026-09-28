@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Ui
 import "util.js" as U
@@ -18,6 +19,77 @@ Column {
   property var kit: null
   property bool making: false
   property string kitPath: ""
+  // Your identity: the card (npub, QR) and the move into Opal.
+  property var card: null
+  property bool showQr: false
+  property var move: null          // {code, words} while the move card is open
+  property string moveState: ""    // "", "waiting", "others", "found", "finishing"
+  property bool finishing: false
+  readonly property var identity: svc && svc.status.identity ? svc.status.identity : ({})
+  readonly property bool canMove: !viaOpal && identity.opal_installed === true
+
+  function loadCard() {
+    if (!svc || !svc.connected) return
+    svc.call("identity.card", null, function(err, r) { if (!err) root.card = r })
+  }
+
+  function openProfile() {
+    if (!card) return
+    var link = "https://njump.me/" + card.nprofile
+    Quickshell.execDetached(["xdg-open", link])
+    svc.message("Opening your profile in the browser", false)
+  }
+
+  function startMove() {
+    svc.call("identity.move.start", null, function(err, r) {
+      if (err) { root.svc.message(err, true); return }
+      root.move = r
+      root.moveState = "waiting"
+      Quickshell.execDetached(["wl-copy", "--", r.code])
+      root.svc.message("The code is on your clipboard", false)
+      root.checkMove()
+    })
+  }
+
+  function checkMove() {
+    if (!svc || !svc.connected || root.moveState === "" || root.moveState === "finishing") return
+    svc.call("opal.accounts", null, function(err, list) {
+      if (err || root.moveState === "" || root.moveState === "finishing") return
+      var mine = root.identity.pubkey
+      var found = false
+      for (var i = 0; i < (list || []).length; i++) if (list[i].pubkey === mine) found = true
+      root.moveState = found ? "found" : ((list || []).length > 0 ? "others" : "waiting")
+    })
+  }
+
+  function finishMove() {
+    if (root.finishing) return
+    root.finishing = true
+    root.moveState = "finishing"
+    svc.call("identity.move.finish", null, function(err, r) {
+      root.finishing = false
+      if (err) { root.moveState = "found"; root.svc.message(err, true); return }
+      Quickshell.execDetached(["wl-copy", "--clear"])
+      root.move = null
+      root.moveState = ""
+      root.svc.message("Opal now holds your identity", false)
+      root.loadCard()
+    })
+  }
+
+  function cancelMove() {
+    root.move = null
+    root.moveState = ""
+    Quickshell.execDetached(["wl-copy", "--clear"])
+  }
+
+  Timer {
+    interval: 3000
+    running: root.visible && root.moveState !== "" && root.moveState !== "finishing"
+    repeat: true
+    onTriggered: root.checkMove()
+  }
+
   property bool confirmLeave: false
   readonly property var relays: svc && svc.status.relays ? svc.status.relays : []
   readonly property bool viaOpal: !!svc && !!svc.status.identity && svc.status.identity.mode === "opal"
@@ -59,7 +131,10 @@ Column {
 
   spacing: Style.space(10)
 
-  onVisibleChanged: if (!visible) { kit = null; kitPath = ""; confirmLeave = false }
+  onVisibleChanged: {
+    if (!visible) { kit = null; kitPath = ""; confirmLeave = false; showQr = false; cancelMove() }
+    else loadCard()
+  }
 
   function setOptIn(pattern, on) {
     var enabled = (choices.enabled || []).filter(function(p) { return p !== pattern })
@@ -267,6 +342,159 @@ Column {
     text: root.relayError
   }
 
+  // ── Your identity ──────────────────────────────────────────────
+  PanelSectionHeader { text: "YOUR IDENTITY"; foreground: root.dim }
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    wrapMode: Text.Wrap
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.bodySmall
+    text: "Your public address on Nostr. People can follow you with it, and other Nostr apps show the same name, likes and follows. Sharing it ties your Gallery name to it."
+  }
+  Row {
+    width: parent.width
+    spacing: Style.space(8)
+    Column {
+      width: parent.width - identityButtons.width - Style.space(8)
+      anchors.verticalCenter: parent.verticalCenter
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        elide: Text.ElideRight
+        color: root.foreground
+        font.family: Style.font.family
+        font.pixelSize: Style.font.body
+        text: root.card && root.card.name ? root.card.name : (root.viaOpal ? "Held by Opal" : "This computer holds the key")
+      }
+      Text {
+        textFormat: Text.PlainText
+        width: parent.width
+        elide: Text.ElideMiddle
+        color: root.dim
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        text: root.card ? root.card.npub : (root.identity.npub || "")
+      }
+    }
+    Row {
+      id: identityButtons
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(2)
+      PanelActionButton {
+        iconText: "󰆏"
+        tooltipText: "Copy your npub"
+        onClicked: root.svc.copy(root.card ? root.card.npub : (root.identity.npub || ""), "Your npub")
+      }
+      PanelActionButton {
+        iconText: "󰐲"
+        tooltipText: root.showQr ? "Hide the QR code" : "Show as a QR code (scan it with a phone app)"
+        onClicked: root.showQr = !root.showQr
+      }
+      PanelActionButton {
+        iconText: "󰏌"
+        tooltipText: root.card && root.card.has_profile ? "Open your profile in the browser" : "Pick a name in the Gallery first, then open your profile"
+        onClicked: root.openProfile()
+      }
+    }
+  }
+  Image {
+    visible: root.showQr && !!root.card
+    anchors.horizontalCenter: parent.horizontalCenter
+    width: Style.space(160)
+    height: width
+    fillMode: Image.PreserveAspectFit
+    smooth: false
+    source: root.showQr && root.card ? root.card.qr : ""
+  }
+  Text {
+    textFormat: Text.PlainText
+    width: parent.width
+    visible: root.canMove && !root.move
+    wrapMode: Text.Wrap
+    color: root.dim
+    font.family: Style.font.family
+    font.pixelSize: Style.font.caption
+    text: "Opal is installed. Move your key into it and Opal holds it from now on: it keeps signing for Peridot, and you can use the same identity in other Nostr apps."
+  }
+  Button {
+    visible: root.canMove && !root.move
+    text: "Move it into Opal"
+    iconText: "󰇈"
+    bordered: true
+    foreground: root.foreground
+    onClicked: root.startMove()
+  }
+  Column {
+    width: parent.width
+    spacing: Style.space(6)
+    visible: !!root.move
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+      text: "Your key is on the clipboard as a one-time code. In Opal: Profiles → Add account → paste it. When Opal asks for the code's password, type these six words exactly, dashes included:"
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      horizontalAlignment: Text.AlignHCenter
+      color: root.foreground
+      font.family: Style.font.family
+      font.pixelSize: Style.font.subtitle
+      font.bold: true
+      text: root.move ? root.move.words : ""
+    }
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      wrapMode: Text.Wrap
+      color: root.moveState === "found" ? root.foreground : root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      text: {
+        switch (root.moveState) {
+        case "found": return "Opal has your key. Finish the move: Peridot pairs with Opal (approve it in the bar) and forgets the key here. Your other computers keep their own copy."
+        case "others": return "Opal has accounts, but not this one yet. Waiting…"
+        case "finishing": return "Approve Peridot in Opal's bar…"
+        default: return "Waiting for Opal to have it… Nothing changes until you finish."
+        }
+      }
+    }
+    Row {
+      spacing: Style.space(8)
+      Button {
+        visible: root.moveState === "found" || root.moveState === "finishing"
+        text: root.finishing ? "Finishing…" : "Finish"
+        iconText: "󰄬"
+        iconSpinning: root.finishing
+        enabled: !root.finishing
+        bordered: true
+        foreground: root.foreground
+        onClicked: root.finishMove()
+      }
+      Button {
+        visible: !root.finishing
+        text: "Copy the code again"
+        iconText: "󰆏"
+        foreground: root.foreground
+        onClicked: { Quickshell.execDetached(["wl-copy", "--", root.move.code]); root.svc.message("Copied", false) }
+      }
+      Button {
+        visible: !root.finishing
+        text: "Cancel"
+        iconText: "󰅖"
+        foreground: root.dim
+        onClicked: root.cancelMove()
+      }
+    }
+  }
+
   // ── Recovery kit ───────────────────────────────────────────────
   PanelSectionHeader { text: "RECOVERY KIT"; foreground: root.dim }
   Text {
@@ -278,7 +506,7 @@ Column {
     font.pixelSize: Style.font.bodySmall
     visible: !root.kit
     text: root.viaOpal
-      ? "Opal holds your key, so your Opal backup (the ncryptsec you can copy in Opal's Profiles) is your recovery kit. On a new computer, restore it in Opal, then choose \"Use your Opal identity\" here. Peridot is listed under Apps in Opal, where you can see what it signed, change what it may do, or revoke it."
+      ? "Opal holds your key, so your Opal backup (the ncryptsec you can copy in Opal's Profiles) is your recovery kit. On a new computer, restore it in Opal, then choose \"Use your Opal identity\" here. Your other computers keep their own copy of the key. Peridot is listed under Apps in Opal, where you can see what it signed, change what it may do, or revoke it."
       : "If you ever lose every computer, a recovery kit brings your settings back: a page to save or print, and six words to write down."
   }
   Button {

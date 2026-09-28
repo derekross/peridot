@@ -435,9 +435,18 @@ impl Gallery {
             .unwrap_or_else(|| short_npub(pk))
     }
 
-    /// Your own profile, if this key has one (None until checked).
+    /// Your own profile, if this key has one: what was fetched this run,
+    /// else what the store remembers from before (None until either).
     pub async fn my_profile(&self) -> Option<Option<Profile>> {
-        self.profile.read().await.clone()
+        if let Some(known) = self.profile.read().await.clone() {
+            return Some(known);
+        }
+        let stored = self
+            .store
+            .profile(&self.me)
+            .map(|(p, _)| p)
+            .filter(|p| !p.name.is_empty());
+        stored.map(Some)
     }
 
     /// Give this key a name, when it has no profile yet. A profile from

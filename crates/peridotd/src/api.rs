@@ -856,6 +856,82 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"ok": true}))
         }
 
+        // ── Your identity ──────────────────────────────────────────────
+        "identity.card" => {
+            // Your public address, for other people and other apps.
+            let engine = app.engine().await?;
+            let pubkey = engine.identity().pubkey();
+            let relays = opal_kit::relays::parse_urls(&app.config.read().await.gallery.relays);
+            let nprofile = Nip19Profile::new(pubkey, relays).to_bech32()?;
+            let qr = opal_kit::qr::svg_data_url(&format!("nostr:{nprofile}"))?;
+            let (has_profile, name) = match app.gallery().await {
+                Ok(g) => {
+                    g.fetch_profiles(&[pubkey], false).await;
+                    let p = g.my_profile().await.flatten();
+                    (p.is_some(), p.map(|p| p.name))
+                }
+                Err(_) => (false, None),
+            };
+            Ok(json!({
+                "pubkey": pubkey.to_hex(),
+                "npub": pubkey.to_bech32()?,
+                "nprofile": nprofile,
+                "qr": qr,
+                "has_profile": has_profile,
+                "name": name,
+                "mode": if engine.identity().via_opal_mode() { "opal" } else { "local" },
+            }))
+        }
+        "identity.move.start" => {
+            // A one-time code for Opal's "Add account": the key encrypted
+            // with six fresh words (exactly a recovery kit). Nothing is
+            // kept here; cancelling is closing the card.
+            let engine = app.engine().await?;
+            let Some(keys) = engine.identity().keys.clone() else {
+                bail!("Opal already holds your key");
+            };
+            let words = recovery::generate_words();
+            let w = words.clone();
+            let code = tokio::task::spawn_blocking(move || recovery::seal_key(&keys, &w)).await??;
+            Ok(json!({
+                "code": code,
+                "words": words.as_str(),
+                "npub": engine.identity().pubkey().to_bech32()?,
+            }))
+        }
+        "identity.move.finish" => {
+            // Opal has the account now: pair for it, forget the key here,
+            // keep the identity and the sync secret. Safe to call again.
+            let engine = app.engine().await?;
+            let identity = engine.identity().clone();
+            if identity.via_opal_mode() {
+                bail!("Opal already holds your key");
+            }
+            let pubkey = identity.pubkey();
+            let accounts = app.opal.accounts().await;
+            let Some(account) = accounts.iter().find(|a| a.pubkey == pubkey.to_hex()) else {
+                if accounts.is_empty() {
+                    bail!(
+                        "Opal doesn't have this key yet (is Opal running?): add it under Profiles first"
+                    );
+                }
+                bail!("Opal doesn't have this key yet: add it under Profiles first");
+            };
+            let paired = app.opal.has_token()
+                && app
+                    .opal
+                    .status()
+                    .await
+                    .is_ok_and(|s| s.pubkey == account.pubkey);
+            if !paired {
+                app.pair_opal(Some(pubkey))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", pair_error(&e)))?;
+            }
+            app.switch_to_opal(Some(account.label.clone())).await?;
+            Ok(json!({"ok": true, "label": account.label}))
+        }
+
         // ── Recovery kit ───────────────────────────────────────────────
         "recovery.create" => {
             let engine = app.engine().await?;

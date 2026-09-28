@@ -187,6 +187,8 @@ enum Cmd {
     Unshare {
         id: i64,
     },
+    /// Your public address (npub), for other people and other apps.
+    Whoami,
     /// Your computers.
     Devices,
     /// The servers your encrypted settings are stored on.
@@ -213,6 +215,9 @@ enum Cmd {
 enum OpalCmd {
     /// Pair (again) with Opal: approve Peridot in Opal's bar.
     Pair,
+    /// Move the key this computer holds into Opal, so Opal holds it from
+    /// now on and can use it in other apps. Peridot keeps working as is.
+    Move,
 }
 
 #[derive(Subcommand)]
@@ -891,6 +896,84 @@ async fn run() -> Result<()> {
             println!("{OPAL_WILL_ASK}");
             c.call("opal.pair", json!(null)).await?;
             println!("Paired. Opal lists Peridot under Apps.");
+        }
+        Cmd::Opal { cmd: OpalCmd::Move } => {
+            let s = c.call("status", json!(null)).await?;
+            if s["identity"]["mode"] == json!("opal") {
+                bail!("Opal already holds your key");
+            }
+            let pubkey = s["identity"]["pubkey"].as_str().unwrap_or("").to_string();
+            let already = c
+                .call("opal.accounts", json!(null))
+                .await?
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x["pubkey"] == json!(pubkey)));
+            if !already {
+                let m = c.call("identity.move.start", json!(null)).await?;
+                let code = m["code"].as_str().unwrap_or("").to_string();
+                let copied = std::process::Command::new("wl-copy")
+                    .arg("--")
+                    .arg(&code)
+                    .status()
+                    .is_ok_and(|st| st.success());
+                println!(
+                    "Your key, as a one-time code for Opal, {}:",
+                    if copied {
+                        "is on your clipboard"
+                    } else {
+                        "is below"
+                    }
+                );
+                if !copied {
+                    println!("  {code}");
+                }
+                println!(
+                    "\nIn Opal: Profiles → Add account → paste the code.\nWhen it asks for the code's password, type these six words exactly, dashes included:\n\n  {}\n\nThen your Opal passphrase. Waiting for Opal to have it… (Ctrl-C stops; nothing changes until it's done)",
+                    m["words"].as_str().unwrap_or("")
+                );
+                let mut found = false;
+                for _ in 0..300 {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let a = c.call("opal.accounts", json!(null)).await?;
+                    if a.as_array()
+                        .is_some_and(|a| a.iter().any(|x| x["pubkey"] == json!(pubkey)))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    bail!(
+                        "Opal still doesn't have the key; run `peridot opal move` again when it does"
+                    );
+                }
+                println!("Opal has it.");
+            }
+            println!("{OPAL_WILL_ASK}");
+            let r = c.call("identity.move.finish", json!(null)).await?;
+            let _ = std::process::Command::new("wl-copy")
+                .arg("--clear")
+                .status();
+            println!(
+                "Done. Opal holds your identity ({}) and signs for Peridot from now on. Your other computers keep their own copy; Opal's backup is your recovery kit now.",
+                r["label"].as_str().unwrap_or("")
+            );
+        }
+        Cmd::Whoami => {
+            let v = c.call("identity.card", json!(null)).await?;
+            if cli.json {
+                out(&v);
+                return Ok(());
+            }
+            if let Some(n) = v["name"].as_str() {
+                println!("{n}");
+            }
+            println!("{}", v["npub"].as_str().unwrap_or(""));
+            println!("{}", v["nprofile"].as_str().unwrap_or(""));
+            println!("https://njump.me/{}", v["nprofile"].as_str().unwrap_or(""));
+            if v["has_profile"] != json!(true) {
+                println!("(Pick a name in the Gallery so other apps show one.)");
+            }
         }
         Cmd::Shares => {
             let s = c.call("share.list", json!(null)).await?;

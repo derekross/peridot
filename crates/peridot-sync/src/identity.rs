@@ -67,6 +67,16 @@ impl Identity {
         self.pubkey
     }
 
+    /// The same identity, with Opal holding the key from now on: the key
+    /// leaves this struct, the sync secret stays.
+    pub fn into_opal_mode(self) -> Self {
+        Self {
+            pubkey: self.pubkey,
+            keys: None,
+            secret: self.secret,
+        }
+    }
+
     pub fn via_opal_mode(&self) -> bool {
         self.keys.is_none()
     }
@@ -226,5 +236,26 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod move_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn moving_into_opal_keeps_the_identity_and_secret_but_drops_the_key() {
+        let store = SecretStore::memory();
+        let local = Identity::generate();
+        local.save(&store).await.unwrap();
+        let moved = local.clone().into_opal_mode();
+        assert_eq!(moved.pubkey(), local.pubkey());
+        assert!(moved.via_opal_mode() && moved.keys.is_none());
+        assert_eq!(moved.secret.to_hex(), local.secret.to_hex());
+        moved.save(&store).await.unwrap();
+        let back = Identity::load(&store).await.unwrap().unwrap();
+        assert!(back.via_opal_mode(), "the keyring no longer holds the key");
+        assert_eq!(back.pubkey(), local.pubkey());
+        assert_eq!(back.secret.to_hex(), local.secret.to_hex());
     }
 }

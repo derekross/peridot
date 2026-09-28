@@ -377,6 +377,9 @@ const DECLARED: [u16; 12] = [30078, 22242, 24242, 0, 3, 5, 7, 13, 17, 1111, 1985
 struct FakeOpal {
     socket: PathBuf,
     keys: nostr_sdk::prelude::Keys,
+    /// Every account, the first being `keys`. Added ones come from
+    /// `add_account` (an import in Opal's Profiles).
+    accounts: std::sync::Arc<std::sync::Mutex<Vec<nostr_sdk::prelude::Keys>>>,
     locked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     answer: std::sync::Arc<std::sync::Mutex<Answer>>,
     token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -397,6 +400,8 @@ impl FakeOpal {
         let token = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let connects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let signs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accounts = std::sync::Arc::new(std::sync::Mutex::new(vec![keys.clone()]));
+        let paired_key = std::sync::Arc::new(std::sync::Mutex::new(None::<Keys>));
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let shared = (
             keys.clone(),
@@ -406,13 +411,16 @@ impl FakeOpal {
             token.clone(),
             connects.clone(),
             signs.clone(),
+            accounts.clone(),
+            paired_key.clone(),
         );
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     break;
                 };
-                let (k, l, label, answer, token, connects, signs) = shared.clone();
+                let (k0, l, label, answer, token, connects, signs, accounts, paired_key) =
+                    shared.clone();
                 tokio::spawn(async move {
                     let (r, mut w) = stream.into_split();
                     let mut lines = BufReader::new(r).lines();
@@ -425,6 +433,14 @@ impl FakeOpal {
                         let paired = p["token"]
                             .as_str()
                             .is_some_and(|t| token.lock().unwrap().as_deref() == Some(t));
+                        // The key the token signs for (the first account
+                        // until a pairing names another).
+                        let k = paired_key
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| k0.clone());
+                        let all: Vec<Keys> = accounts.lock().unwrap().clone();
                         let sensitive_no = |sensitive: bool| {
                             answer == Answer::Deny || (answer == Answer::DenySensitive && sensitive)
                         };
@@ -434,8 +450,12 @@ impl FakeOpal {
                         {
                             "status" | "subscribe" => Ok(json!({
                                 "has_accounts": true,
-                                "accounts": [{"pubkey": k.public_key().to_hex(), "label": label,
-                                              "npub": k.public_key().to_bech32().unwrap(), "current": true}],
+                                "accounts": all.iter().enumerate().map(|(i, a)| json!({
+                                    "pubkey": a.public_key().to_hex(),
+                                    "label": if i == 0 { label.clone() } else { format!("{label} {i}") },
+                                    "npub": a.public_key().to_bech32().unwrap(),
+                                    "current": i == 0,
+                                })).collect::<Vec<_>>(),
                             })),
                             "app.connect" => {
                                 assert_eq!(p["app"], json!("peridot"));
@@ -443,17 +463,24 @@ impl FakeOpal {
                                 assert_eq!(p["kinds"], json!(DECLARED));
                                 assert_eq!(p["nip44"], json!(true));
                                 assert_eq!(p["dm"], json!(true));
-                                if let Some(pk) = p["pubkey"].as_str() {
-                                    assert_eq!(pk, k.public_key().to_hex());
-                                }
+                                // Which account: the named one, else the first.
+                                let chosen = match p["pubkey"].as_str() {
+                                    Some(pk) => all
+                                        .iter()
+                                        .find(|a| a.public_key().to_hex() == pk)
+                                        .cloned()
+                                        .unwrap_or_else(|| panic!("unknown account {pk}")),
+                                    None => k0.clone(),
+                                };
                                 if answer == Answer::Deny {
                                     Err("declined".into())
                                 } else {
                                     // Pairing works while locked (it needs no key).
                                     let t = Keys::generate().secret_key().to_secret_hex();
                                     *token.lock().unwrap() = Some(t.clone());
+                                    *paired_key.lock().unwrap() = Some(chosen.clone());
                                     connects.fetch_add(1, Ordering::SeqCst);
-                                    Ok(json!({"token": t, "pubkey": k.public_key().to_hex()}))
+                                    Ok(json!({"token": t, "pubkey": chosen.public_key().to_hex()}))
                                 }
                             }
                             "app.status" if !paired => Err("not paired".into()),
@@ -531,8 +558,17 @@ impl FakeOpal {
             token,
             connects,
             signs,
+            accounts,
             _dir: dir,
         }
+    }
+
+    /// What "Add account" in Opal's Profiles does with a Peridot code:
+    /// open the ncryptsec with its password and keep the key.
+    fn add_account(&self, code: &str, words: &str) -> nostr_sdk::prelude::Keys {
+        let keys = peridot_sync::recovery::open_kit(code, words).unwrap();
+        self.accounts.lock().unwrap().push(keys.clone());
+        keys
     }
 
     fn set_locked(&self, locked: bool) {
@@ -1520,4 +1556,152 @@ async fn opal_signs_gallery_events_and_seals_messages() {
     let got = inbox(&url, &friend).await;
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].sender, opal.keys.public_key());
+}
+
+// ── Moving a silent key into Opal ────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let site = FakeSite::start(PLUGINS_JSON, THEMES_JSON).await;
+    let desk = gallery_daemon(&url, "Desk", &site, Some(&opal.socket)).await;
+    let laptop = Daemon::start(&url, "Laptop").await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "desk set up", |s| s["set_up"] == json!(true)).await;
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    until(&desk, 20, "published", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    // The laptop joins through pairing, as a real second computer would.
+    let offer = laptop.call("pair.new", json!(null)).await;
+    desk.call("pair.join", json!({"code": offer["code"]})).await;
+    until(&desk, 20, "confirm", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    until(&laptop, 20, "confirm", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"matches": true})).await;
+    until(&laptop, 20, "laptop set up", |s| s["set_up"] == json!(true)).await;
+    let s = desk.status().await;
+    assert_eq!(s["identity"]["mode"], json!("local"));
+    assert_eq!(s["identity"]["opal_installed"], json!(true));
+    let pubkey = s["identity"]["pubkey"].as_str().unwrap().to_string();
+
+    // Too early: Opal doesn't have the key.
+    let mut c = crate::Client::open(&desk.socket).await;
+    let e = c
+        .call("identity.move.finish", json!(null))
+        .await
+        .unwrap_err();
+    assert!(e.contains("doesn't have this key yet"), "{e}");
+
+    // The code opens with the words and is this very key.
+    let m = desk.call("identity.move.start", json!(null)).await;
+    let code = m["code"].as_str().unwrap().to_string();
+    let words = m["words"].as_str().unwrap().to_string();
+    assert!(
+        code.starts_with("ncryptsec1") && words.matches('-').count() == 5,
+        "{m}"
+    );
+    let keys = opal.add_account(&code, &words);
+    assert_eq!(keys.public_key().to_hex(), pubkey);
+    assert!(
+        desk.call("opal.accounts", json!(null))
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["pubkey"] == json!(pubkey)),
+        "the panel sees the account through opal.accounts"
+    );
+
+    // Declined pairing: nothing changes, and a retry works.
+    opal.set_answer(Answer::Deny);
+    let e = c
+        .call("identity.move.finish", json!(null))
+        .await
+        .unwrap_err();
+    assert!(e.contains("declined"), "{e}");
+    assert_eq!(desk.status().await["identity"]["mode"], json!("local"));
+    opal.set_answer(Answer::Allow);
+    let r = desk.call("identity.move.finish", json!(null)).await;
+    assert_eq!(r["label"], json!("Derek 1"));
+    let s = until(&desk, 20, "opal mode", |s| {
+        s["identity"]["mode"] == json!("opal")
+    })
+    .await;
+    assert_eq!(s["identity"]["pubkey"], json!(pubkey), "same identity");
+    assert_eq!(s["identity"]["name"], json!("Derek 1"));
+    assert_eq!(s["counts"]["in_sync"], json!(1), "sync state kept");
+    assert_eq!(opal.connects(), 1);
+    // Calling it again is harmless.
+    let e = c
+        .call("identity.move.finish", json!(null))
+        .await
+        .unwrap_err();
+    assert!(e.contains("already holds"), "{e}");
+    let e = c
+        .call("identity.move.start", json!(null))
+        .await
+        .unwrap_err();
+    assert!(e.contains("already holds"), "{e}");
+    let e = c.call("recovery.create", json!(null)).await.unwrap_err();
+    assert!(e.contains("Opal holds your key"), "{e}");
+
+    // Opal signs now, and the laptop (same sync secret) still gets changes.
+    let signs = opal.signs();
+    desk.write(".config/kitty/kitty.conf", "font_size 14");
+    until(&desk, 30, "published via Opal", |s| {
+        s["counts"]["outgoing"] == json!(0)
+    })
+    .await;
+    assert!(opal.signs() > signs, "Opal signed the change");
+    laptop.call("sync.now", json!(null)).await;
+    until(&laptop, 30, "laptop sees it", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_identity_card_names_the_key_and_its_relays() {
+    use nostr_sdk::prelude::{FromBech32, Nip19Profile, PublicKey};
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let site = FakeSite::start(PLUGINS_JSON, THEMES_JSON).await;
+    let desk = gallery_daemon(&url, "Desk", &site, None).await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+    let pubkey = desk.status().await["identity"]["pubkey"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let card = desk.call("identity.card", json!(null)).await;
+    assert_eq!(
+        PublicKey::parse(card["npub"].as_str().unwrap())
+            .unwrap()
+            .to_hex(),
+        pubkey
+    );
+    let profile = Nip19Profile::from_bech32(card["nprofile"].as_str().unwrap()).unwrap();
+    assert_eq!(profile.public_key.to_hex(), pubkey);
+    assert_eq!(profile.relays.len(), 1, "{card}");
+    assert!(
+        card["qr"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/svg+xml")
+    );
+    assert_eq!(card["has_profile"], json!(false));
+    assert_eq!(card["mode"], json!("local"));
+    desk.call("profile.set", json!({"name": "Derek"})).await;
+    let card = desk.call("identity.card", json!(null)).await;
+    assert_eq!(card["has_profile"], json!(true));
+    assert_eq!(card["name"], json!("Derek"));
 }

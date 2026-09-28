@@ -43,6 +43,8 @@ pub struct App {
     pub home: PathBuf,
     pub data_dir: PathBuf,
     pub opal: crate::opal::OpalClient,
+    /// Opal's control socket: its presence says Opal is installed.
+    pub opal_socket: PathBuf,
     /// For small lookups (NIP-05 addresses).
     pub http: reqwest::Client,
     pub events: broadcast::Sender<IpcEvent>,
@@ -69,6 +71,7 @@ impl App {
             home: o.home,
             data_dir: o.data_dir,
             opal: crate::opal::OpalClient::new(&o.opal_socket),
+            opal_socket: o.opal_socket,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .redirect(reqwest::redirect::Policy::limited(3))
@@ -181,6 +184,9 @@ impl App {
             self.clear_sync_state()?;
             self.db.set_kv("peridot.identity", &pubkey)?;
         }
+        // Whatever ran before goes away first (its client, its signer and
+        // any key it held).
+        self.stop_engine().await;
         let cfg = self.config.read().await.clone();
         let store = SyncStore::new(self.db.clone())?;
         let signer: Arc<dyn IdentitySigner> = match &identity.keys {
@@ -218,9 +224,6 @@ impl App {
             device_name: cfg.device_name(),
             version: env!("CARGO_PKG_VERSION").into(),
         })?);
-        if let Some(old) = self.runner.lock().await.take() {
-            old.abort();
-        }
         *self.engine.write().await = Some(engine.clone());
         // Share links sign with the same identity.
         let sharer = Arc::new(crate::share::Sharer::new(
@@ -235,12 +238,6 @@ impl App {
         *self.runner.lock().await = Some(handle);
         // The Gallery: public, so it signs interactively too (a like is
         // something you just did).
-        if let Some(old) = self.gallery_runner.lock().await.take() {
-            old.abort();
-        }
-        if let Some(old) = self.gallery.write().await.take() {
-            old.client().shutdown().await;
-        }
         if cfg.gallery.enabled {
             let gallery = Arc::new(crate::gallery::Gallery::new(
                 crate::gallery::GalleryParams {
@@ -261,7 +258,9 @@ impl App {
 
     /// Forget this computer's identity and synced state (the other
     /// computers keep theirs).
-    pub async fn leave(self: &Arc<Self>) -> anyhow::Result<()> {
+    /// Stop the engine, the sharer and the Gallery, and drop them (with
+    /// the signer, and so any key it held).
+    pub async fn stop_engine(&self) {
         if let Some(r) = self.runner.lock().await.take() {
             r.abort();
         }
@@ -275,6 +274,26 @@ impl App {
         if let Some(g) = self.gallery.write().await.take() {
             g.client().shutdown().await;
         }
+    }
+
+    /// Opal now holds the key this computer held: keep the identity and
+    /// the sync secret, forget the key, sign through Opal from now on. The
+    /// pairing must already be in place (a crash between the two leaves a
+    /// working local identity plus an unused token, never a half state).
+    pub async fn switch_to_opal(self: &Arc<Self>, label: Option<String>) -> anyhow::Result<()> {
+        let identity = self.engine().await?.identity().clone();
+        anyhow::ensure!(!identity.via_opal_mode(), "Opal already holds your key");
+        let moved = identity.into_opal_mode();
+        moved.save(&self.secrets).await?;
+        self.start_engine(moved, false).await?;
+        self.db
+            .set_kv("peridot.identity_name", label.as_deref().unwrap_or(""))?;
+        self.emit_state().await;
+        Ok(())
+    }
+
+    pub async fn leave(self: &Arc<Self>) -> anyhow::Result<()> {
+        self.stop_engine().await;
         Identity::forget(&self.secrets).await?;
         // Opal keeps its side of the pairing until you revoke it there.
         crate::opal::forget_token(&self.secrets).await?;
@@ -369,6 +388,9 @@ impl App {
             "pubkey": identity.pubkey().to_hex(),
             "npub": identity.pubkey().to_bech32().ok(),
             "name": self.db.get_kv("peridot.identity_name").ok().flatten(),
+            // Opal is installed (its socket exists), so a key held here
+            // could move into it.
+            "opal_installed": self.opal_socket.exists(),
         });
         v["opal"] = if identity.via_opal_mode() {
             let mut o = json!(opal);
