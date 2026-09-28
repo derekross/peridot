@@ -15,10 +15,26 @@ Column {
   readonly property var shares: svc ? (svc.status.shares || []) : []
   readonly property int days: svc && svc.status.share_expire_days ? svc.status.share_expire_days : 7
   property string confirmRemove: ""
+  // The link whose "Send to…" row is open.
+  property string sendingId: ""
+  property bool sending: false
+
+  function sendTo(id, who) {
+    var w = (who || "").trim()
+    if (w === "") { svc.message("Who should it go to? An npub or a name@domain address", true); return }
+    if (sending) return
+    sending = true
+    svc.call("share.send", { id: id, to: w }, function(err, r) {
+      root.sending = false
+      if (err) { root.svc.message(err, true); return }
+      root.sendingId = ""
+      root.svc.message("Sent to " + (r && r.to ? r.to : w), false)
+    })
+  }
 
   spacing: Style.space(10)
 
-  onVisibleChanged: if (!visible) confirmRemove = ""
+  onVisibleChanged: if (!visible) { confirmRemove = ""; sendingId = "" }
 
   function left(expires) {
     var s = expires - Math.floor((svc ? svc.now : Date.now()) / 1000)
@@ -104,50 +120,82 @@ Column {
   }
   Repeater {
     model: root.shares
-    delegate: Row {
+    delegate: Column {
+      id: share
       required property var modelData
       width: root.width
-      spacing: Style.space(8)
-      Column {
-        width: parent.width - shareButtons.width - Style.space(8)
-        anchors.verticalCenter: parent.verticalCenter
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          elide: Text.ElideMiddle
-          color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          text: modelData.name
+      spacing: Style.space(4)
+      readonly property bool sendOpen: root.sendingId === String(modelData.id)
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+        Column {
+          width: parent.width - shareButtons.width - Style.space(8)
+          anchors.verticalCenter: parent.verticalCenter
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            elide: Text.ElideMiddle
+            color: root.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            text: share.modelData.name
+          }
+          Text {
+            textFormat: Text.PlainText
+            width: parent.width
+            elide: Text.ElideRight
+            color: root.dim
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            text: root.human(share.modelData.size) + " · " + root.left(share.modelData.expires) + " · " + share.modelData.server
+          }
         }
-        Text {
-          textFormat: Text.PlainText
-          width: parent.width
-          elide: Text.ElideRight
-          color: root.dim
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          text: root.human(modelData.size) + " · " + root.left(modelData.expires) + " · " + modelData.server
+        Row {
+          id: shareButtons
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(2)
+          PanelActionButton {
+            iconText: "󰆏"
+            tooltipText: "Copy link"
+            onClicked: root.svc.copy(share.modelData.url, "Link copied")
+          }
+          PanelActionButton {
+            iconText: "󰇮"
+            tooltipText: share.sendOpen ? "Close" : "Send as a private message"
+            onClicked: root.sendingId = share.sendOpen ? "" : String(share.modelData.id)
+          }
+          PanelActionButton {
+            iconText: "󰆴"
+            hoverColor: root.urgent
+            tooltipText: root.confirmRemove === String(share.modelData.id) ? "Click again: the link stops working" : "Remove"
+            onClicked: {
+              if (root.confirmRemove !== String(share.modelData.id)) { root.confirmRemove = String(share.modelData.id); return }
+              root.confirmRemove = ""
+              root.svc.run("share.revoke", { id: share.modelData.id }, function() { root.svc.message("Removed", false) })
+            }
+          }
         }
       }
       Row {
-        id: shareButtons
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: Style.space(2)
-        PanelActionButton {
-          iconText: "󰆏"
-          tooltipText: "Copy link"
-          onClicked: root.svc.copy(modelData.url, "Link copied")
+        width: parent.width
+        visible: share.sendOpen
+        spacing: Style.space(8)
+        TextField {
+          id: sendField
+          width: parent.width - sendButton.width - Style.space(8)
+          placeholderText: "npub or name@domain"
+          foreground: root.foreground
+          onAccepted: root.sendTo(share.modelData.id, text)
         }
-        PanelActionButton {
-          iconText: "󰆴"
-          hoverColor: root.urgent
-          tooltipText: root.confirmRemove === String(modelData.id) ? "Click again: the link stops working" : "Remove"
-          onClicked: {
-            if (root.confirmRemove !== String(modelData.id)) { root.confirmRemove = String(modelData.id); return }
-            root.confirmRemove = ""
-            root.svc.run("share.revoke", { id: modelData.id }, function() { root.svc.message("Removed", false) })
-          }
+        Button {
+          id: sendButton
+          text: root.sending ? "Sending…" : "Send"
+          iconText: "󰇮"
+          iconSpinning: root.sending
+          bordered: true
+          foreground: root.foreground
+          onClicked: root.sendTo(share.modelData.id, sendField.text)
         }
       }
     }

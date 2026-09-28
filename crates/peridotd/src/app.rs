@@ -43,10 +43,14 @@ pub struct App {
     pub home: PathBuf,
     pub data_dir: PathBuf,
     pub opal: crate::opal::OpalClient,
+    /// For small lookups (NIP-05 addresses).
+    pub http: reqwest::Client,
     pub events: broadcast::Sender<IpcEvent>,
     pub engine: RwLock<Option<Arc<SyncEngine>>>,
     pub sharer: RwLock<Option<Arc<crate::share::Sharer>>>,
+    pub gallery: RwLock<Option<Arc<crate::gallery::Gallery>>>,
     pub runner: Mutex<Option<JoinHandle<()>>>,
+    pub gallery_runner: Mutex<Option<JoinHandle<()>>>,
     pub pairing: Mutex<Option<PairSession>>,
     /// Wakes the runner for an immediate sync.
     pub nudge: Notify,
@@ -65,10 +69,17 @@ impl App {
             home: o.home,
             data_dir: o.data_dir,
             opal: crate::opal::OpalClient::new(&o.opal_socket),
+            http: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::limited(3))
+                .build()
+                .expect("an http client"),
             events,
             engine: RwLock::new(None),
             sharer: RwLock::new(None),
+            gallery: RwLock::new(None),
             runner: Mutex::new(None),
+            gallery_runner: Mutex::new(None),
             pairing: Mutex::new(None),
             nudge: Notify::new(),
             last_sync: AtomicU64::new(0),
@@ -144,6 +155,12 @@ impl App {
             .ok_or_else(|| anyhow::anyhow!("Peridot isn't set up on this computer yet"))
     }
 
+    pub async fn gallery(&self) -> anyhow::Result<Arc<crate::gallery::Gallery>> {
+        self.gallery.read().await.clone().ok_or_else(|| {
+            anyhow::anyhow!("the Gallery is turned off (or Peridot isn't set up yet)")
+        })
+    }
+
     pub async fn is_set_up(&self) -> bool {
         self.engine.read().await.is_some()
     }
@@ -208,7 +225,7 @@ impl App {
         // Share links sign with the same identity.
         let sharer = Arc::new(crate::share::Sharer::new(
             crate::share::ShareStore::new(self.db.clone())?,
-            share_signer,
+            share_signer.clone(),
             cfg.share.servers.clone(),
             cfg.share.viewer.clone(),
         )?);
@@ -216,6 +233,28 @@ impl App {
         crate::share::spawn_sweeper(sharer);
         let handle = crate::runner::spawn(self.clone(), engine, fresh);
         *self.runner.lock().await = Some(handle);
+        // The Gallery: public, so it signs interactively too (a like is
+        // something you just did).
+        if let Some(old) = self.gallery_runner.lock().await.take() {
+            old.abort();
+        }
+        if let Some(old) = self.gallery.write().await.take() {
+            old.client().shutdown().await;
+        }
+        if cfg.gallery.enabled {
+            let gallery = Arc::new(crate::gallery::Gallery::new(
+                crate::gallery::GalleryParams {
+                    store: crate::gallery::GalleryStore::new(self.db.clone())?,
+                    signer: share_signer,
+                    relays: opal_kit::relays::parse_urls(&cfg.gallery.relays),
+                    home: self.home.clone(),
+                    plugins_url: cfg.gallery.plugins_url.clone(),
+                    themes_url: cfg.gallery.themes_url.clone(),
+                },
+            )?);
+            *self.gallery.write().await = Some(gallery.clone());
+            *self.gallery_runner.lock().await = Some(crate::gallery::spawn(self.clone(), gallery));
+        }
         self.emit_state().await;
         Ok(())
     }
@@ -230,6 +269,12 @@ impl App {
             engine.client().shutdown().await;
         }
         self.sharer.write().await.take();
+        if let Some(r) = self.gallery_runner.lock().await.take() {
+            r.abort();
+        }
+        if let Some(g) = self.gallery.write().await.take() {
+            g.client().shutdown().await;
+        }
         Identity::forget(&self.secrets).await?;
         // Opal keeps its side of the pairing until you revoke it there.
         crate::opal::forget_token(&self.secrets).await?;
@@ -370,6 +415,24 @@ impl App {
                 .collect::<Vec<_>>()
         );
         v["share_expire_days"] = json!(cfg.share.expire_days);
+        v["gallery"] = match self.gallery.read().await.clone() {
+            Some(g) => {
+                let (themes, plugins) = g.store.item_count();
+                let (following, second) = g.wot_size();
+                json!({
+                    "enabled": true,
+                    "themes": themes,
+                    "plugins": plugins,
+                    "following": following,
+                    "trusted": following + second,
+                    // null = no profile yet (ask for a name before the first
+                    // like); missing = not checked yet.
+                    "profile": g.my_profile().await.map(|p| json!(p)),
+                    "error": g.error().await,
+                })
+            }
+            None => json!({"enabled": false}),
+        };
         v["waiting_to_send"] = json!(overview.waiting_to_send);
         v["last_sync"] = json!(self.last_sync.load(Ordering::Relaxed));
         v["choices"] = json!(cfg.sync);

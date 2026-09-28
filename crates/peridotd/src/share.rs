@@ -270,6 +270,85 @@ impl Sharer {
         n
     }
 
+    /// Send a link to someone as a private message (NIP-17). Their inbox
+    /// relays are looked up through `client`; `fallback` relays get the
+    /// message when they list none, and always get your own copy.
+    pub async fn send(
+        &self,
+        id: i64,
+        to: PublicKey,
+        client: &Client,
+        fallback: &[RelayUrl],
+    ) -> anyhow::Result<Share> {
+        let s = self
+            .store
+            .get(id)?
+            .ok_or_else(|| anyhow::anyhow!("no such link"))?;
+        anyhow::ensure!(!s.revoked, "that link was removed");
+        anyhow::ensure!(
+            s.expires > Timestamp::now().as_secs(),
+            "that link has expired; share the file again"
+        );
+        let text = format!(
+            "{}\n{}\n\nA private link from Peridot: it opens in your browser and works until {}.",
+            s.name,
+            s.url,
+            ymd(s.expires)
+        );
+        let wrapped = peridot_sync::dm::wrap(self.signer.clone(), to, &text)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let inbox = peridot_sync::dm::inbox_relays(client, to, fallback).await;
+        for r in &inbox {
+            let _ = client.add_relay(r).await;
+        }
+        client
+            .connect()
+            .and_wait(opal_kit::relays::CONNECT_WAIT)
+            .await;
+        opal_kit::relays::publish(client, &wrapped.to_them, &inbox)
+            .await
+            .map_err(|e| anyhow::anyhow!("couldn't deliver it: {e}"))?;
+        // Your copy is best effort.
+        let _ = opal_kit::relays::publish(client, &wrapped.to_me, fallback).await;
+        Ok(s)
+    }
+
+    /// Upload something for everyone to see (a setup's screenshot), to the
+    /// first server that takes it. Returns its address.
+    pub async fn upload_public(&self, data: &[u8], mime: &str) -> anyhow::Result<String> {
+        let sha256 = peridot_sync::crypto::sha256_hex(data);
+        let expires = Timestamp::now().as_secs() + 600;
+        let mut last_err = anyhow::anyhow!("no share server is configured");
+        for server in &self.servers {
+            let auth = self.auth("upload", &sha256, expires).await?;
+            let res = self
+                .http
+                .put(format!("{}/upload", server.trim_end_matches('/')))
+                .header("Authorization", auth)
+                .header("Content-Type", mime)
+                .header("X-SHA-256", &sha256)
+                .body(data.to_vec())
+                .send()
+                .await;
+            match res {
+                Ok(res) if res.status().is_success() => {
+                    let desc: serde_json::Value = res.json().await.unwrap_or_default();
+                    if let Some(url) = desc["url"].as_str().filter(|u| u.starts_with("https://")) {
+                        return Ok(url.to_string());
+                    }
+                    let ext = mime.split('/').nth(1).unwrap_or("bin");
+                    return Ok(format!("{}/{sha256}.{ext}", server.trim_end_matches('/')));
+                }
+                Ok(res) => {
+                    last_err = anyhow::anyhow!("{server} refused the upload ({})", res.status())
+                }
+                Err(e) => last_err = e.into(),
+            }
+        }
+        Err(last_err)
+    }
+
     /// BUD-01: `PUT /upload` with a signed kind 24242 authorization.
     async fn upload(&self, server: &str, sealed: &Sealed, expires: u64) -> anyhow::Result<()> {
         let auth = self.auth("upload", &sealed.sha256, expires).await?;
@@ -291,7 +370,9 @@ impl Sharer {
         if status.as_u16() == 415 {
             // Media hosts check for a picture or a video; an encrypted blob
             // is neither.
-            anyhow::bail!("{server} only takes pictures and videos, so it can't hold a private link");
+            anyhow::bail!(
+                "{server} only takes pictures and videos, so it can't hold a private link"
+            );
         }
         if !status.is_success() {
             anyhow::bail!(
@@ -340,6 +421,11 @@ impl Sharer {
     }
 }
 
+/// `YYYY-MM-DD` (UTC).
+fn ymd(secs: u64) -> String {
+    crate::api::ymd(secs)
+}
+
 fn server_base(host: &str) -> String {
     format!("{}://{host}", share::scheme_for(host))
 }
@@ -378,6 +464,14 @@ mod tests {
     }
 
     impl IdentitySigner for SaysNo {
+        fn nip44_encrypt_to(
+            &self,
+            _peer: PublicKey,
+            _plaintext: String,
+        ) -> futures::future::BoxFuture<'_, Result<String, SignError>> {
+            Box::pin(async { Err(SignError::Failed("no".into())) })
+        }
+
         fn pubkey(&self) -> PublicKey {
             Keys::generate().public_key()
         }

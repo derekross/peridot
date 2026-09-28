@@ -6,6 +6,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use nostr_sdk::prelude::*;
 use opal_core::import::{ImportOptions, parse_secret};
+use peridot_sync::gallery::ItemKind;
 use peridot_sync::identity::Identity;
 use peridot_sync::manifest::{Choices, Manifest};
 use peridot_sync::recovery;
@@ -284,6 +285,334 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!({"ok": true}))
         }
 
+        "share.send" => {
+            // A link straight to someone, as a private message.
+            #[derive(Deserialize)]
+            struct P {
+                id: i64,
+                to: String,
+            }
+            let p: P = parse(params)?;
+            let sharer = app.sharer().await?;
+            let to = crate::contacts::resolve(&app.http, &p.to).await?;
+            let gallery = app.gallery().await.ok();
+            let fallback = opal_kit::relays::parse_urls(&app.config.read().await.gallery.relays);
+            let share = match &gallery {
+                Some(g) => sharer.send(p.id, to, g.client(), &fallback).await,
+                None => {
+                    let client = Client::default();
+                    for r in &fallback {
+                        let _ = client.add_relay(r).await;
+                    }
+                    client
+                        .connect()
+                        .and_wait(opal_kit::relays::CONNECT_WAIT)
+                        .await;
+                    let r = sharer.send(p.id, to, &client, &fallback).await;
+                    client.shutdown().await;
+                    r
+                }
+            }
+            .map_err(share_err)?;
+            let name = match &gallery {
+                Some(g) => {
+                    g.fetch_profiles(&[to], false).await;
+                    g.name_of(&to)
+                }
+                None => crate::gallery::short_npub(&to),
+            };
+            Ok(json!({"ok": true, "name": share.name, "to": name, "pubkey": to.to_hex()}))
+        }
+        "contacts.resolve" => {
+            #[derive(Deserialize)]
+            struct P {
+                who: String,
+            }
+            let p: P = parse(params)?;
+            let pk = crate::contacts::resolve(&app.http, &p.who).await?;
+            let name = match app.gallery().await {
+                Ok(g) => {
+                    g.fetch_profiles(&[pk], false).await;
+                    g.name_of(&pk)
+                }
+                Err(_) => crate::gallery::short_npub(&pk),
+            };
+            Ok(json!({"pubkey": pk.to_hex(), "npub": pk.to_bech32().ok(), "name": name}))
+        }
+
+        // ── The Gallery ────────────────────────────────────────────────
+        "gallery.list" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct P {
+                kind: Option<ItemKind>,
+                query: String,
+                sort: String,
+                offset: usize,
+                limit: usize,
+            }
+            let p: P = parse(params)?;
+            let g = app.gallery().await?;
+            let limit = if p.limit == 0 { 30 } else { p.limit };
+            let (items, total) = g.list(p.kind, &p.query, &p.sort, p.offset, limit).await?;
+            Ok(json!({"items": items, "total": total}))
+        }
+        "gallery.item" => {
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+            }
+            let p: P = parse(params)?;
+            let g = app.gallery().await?;
+            let item = g.item(&p.url).await?;
+            let reviews = g.reviews(&p.url).await?;
+            Ok(json!({"item": item, "reviews": reviews}))
+        }
+        "gallery.reviews" => {
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+            }
+            let p: P = parse(params)?;
+            Ok(json!(app.gallery().await?.reviews(&p.url).await?))
+        }
+        "gallery.like" => {
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+                #[serde(default = "yes")]
+                on: bool,
+            }
+            let p: P = parse(params)?;
+            app.gallery()
+                .await?
+                .like(&p.url, p.on)
+                .await
+                .map_err(gallery_err)?;
+            Ok(json!({"ok": true}))
+        }
+        "gallery.review" => {
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+                text: String,
+                #[serde(default)]
+                rating: Option<u8>,
+            }
+            let p: P = parse(params)?;
+            Ok(json!(
+                app.gallery()
+                    .await?
+                    .review(&p.url, &p.text, p.rating)
+                    .await
+                    .map_err(gallery_err)?
+            ))
+        }
+        "gallery.unreview" => {
+            #[derive(Deserialize)]
+            struct P {
+                id: String,
+            }
+            let p: P = parse(params)?;
+            app.gallery()
+                .await?
+                .unreview(&p.id)
+                .await
+                .map_err(gallery_err)?;
+            Ok(json!({"ok": true}))
+        }
+        "gallery.follow" => {
+            #[derive(Deserialize)]
+            struct P {
+                pubkey: String,
+                #[serde(default = "yes")]
+                on: bool,
+            }
+            let p: P = parse(params)?;
+            let pk =
+                PublicKey::parse(&p.pubkey).map_err(|_| anyhow::anyhow!("that isn't a key"))?;
+            app.gallery()
+                .await?
+                .follow(pk, p.on)
+                .await
+                .map_err(gallery_err)?;
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+        "gallery.following" => Ok(json!(app.gallery().await?.following().await)),
+        "gallery.setups" => {
+            #[derive(Deserialize, Default)]
+            #[serde(default)]
+            struct P {
+                query: String,
+            }
+            let p: P = parse(params)?;
+            Ok(json!(app.gallery().await?.setups(&p.query).await?))
+        }
+        "gallery.setup.mine" => {
+            let g = app.gallery().await?;
+            let spec = g.my_setup();
+            let can = spec.theme.is_some() || !spec.themes.is_empty() || !spec.plugins.is_empty();
+            let mut v = json!(spec);
+            v["can_publish"] = json!(can);
+            v["screenshot"] = json!(last_screenshot(&app.home));
+            Ok(v)
+        }
+        "gallery.setup.publish" => {
+            #[derive(Deserialize)]
+            struct P {
+                title: String,
+                #[serde(default)]
+                summary: String,
+                /// A picture to upload for everyone to see (its full path),
+                /// or nothing.
+                #[serde(default)]
+                screenshot: Option<String>,
+            }
+            let p: P = parse(params)?;
+            let g = app.gallery().await?;
+            let mut spec = g.my_setup();
+            spec.title = p.title;
+            spec.summary = p.summary;
+            if let Some(path) = p.screenshot.filter(|s| !s.trim().is_empty()) {
+                let path = std::path::PathBuf::from(path);
+                anyhow::ensure!(path.is_absolute(), "give the picture's full path");
+                spec.image = Some(
+                    g.upload_image(app.sharer().await?.as_ref(), &path)
+                        .await
+                        .map_err(share_err)?,
+                );
+            }
+            Ok(json!(g.publish_setup(spec).await.map_err(gallery_err)?))
+        }
+        "gallery.setup.remove" => {
+            #[derive(Deserialize)]
+            struct P {
+                coordinate: String,
+            }
+            let p: P = parse(params)?;
+            app.gallery()
+                .await?
+                .remove_setup(&p.coordinate)
+                .await
+                .map_err(gallery_err)?;
+            Ok(json!({"ok": true}))
+        }
+        "gallery.setup.install" => {
+            // Everything in someone's setup that isn't here yet, then
+            // their theme. Each step is one of the commands the offers run.
+            #[derive(Deserialize)]
+            struct P {
+                coordinate: String,
+            }
+            let p: P = parse(params)?;
+            let g = app.gallery().await?;
+            let setup = g
+                .store
+                .setup(&p.coordinate)?
+                .ok_or_else(|| anyhow::anyhow!("no such setup"))?;
+            let mut done = Vec::new();
+            let mut failed = Vec::new();
+            for step in g.setup_steps(&setup) {
+                let r = match &step {
+                    crate::gallery::Step::InstallTheme(url) if valid_source(url) => {
+                        run_omarchy("omarchy-theme-install", &[url]).await
+                    }
+                    crate::gallery::Step::InstallPlugin(url) if valid_source(url) => {
+                        run_omarchy("omarchy-plugin-add", &[url, "--yes"]).await
+                    }
+                    crate::gallery::Step::SwitchTheme(name) if valid_name(name) => {
+                        let r = run_omarchy("omarchy-theme-set", &[name]).await;
+                        if r.is_ok()
+                            && let Ok(engine) = app.engine().await
+                        {
+                            let _ = engine.theme_applied(name);
+                        }
+                        r
+                    }
+                    _ => Err(anyhow::anyhow!("that isn't something Peridot can install")),
+                };
+                match r {
+                    Ok(()) => done.push(step),
+                    Err(e) => failed.push(json!({"step": step, "error": e.to_string()})),
+                }
+            }
+            app.nudge.notify_one();
+            app.emit_state().await;
+            Ok(json!({"done": done, "failed": failed}))
+        }
+        "gallery.install" => {
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+                kind: ItemKind,
+            }
+            let p: P = parse(params)?;
+            let url = peridot_sync::gallery::canonical_url(&p.url)
+                .ok_or_else(|| anyhow::anyhow!("that isn't a repository address"))?;
+            anyhow::ensure!(
+                valid_source(&url),
+                "that isn't something Peridot can install"
+            );
+            match p.kind {
+                ItemKind::Theme => run_omarchy("omarchy-theme-install", &[&url]).await?,
+                ItemKind::Plugin => run_omarchy("omarchy-plugin-add", &[&url, "--yes"]).await?,
+            }
+            app.nudge.notify_one();
+            app.emit_state().await;
+            Ok(json!({"ok": true}))
+        }
+        "gallery.list_item" => {
+            // Put a repository on the map for everyone.
+            #[derive(Deserialize)]
+            struct P {
+                url: String,
+                kind: ItemKind,
+                name: String,
+            }
+            let p: P = parse(params)?;
+            Ok(json!(
+                app.gallery()
+                    .await?
+                    .list_item(&p.url, p.kind, &p.name)
+                    .await
+                    .map_err(gallery_err)?
+            ))
+        }
+        "gallery.refresh" => {
+            let g = app.gallery().await?;
+            g.connect().await;
+            let registries = g
+                .refresh_registries(true)
+                .await
+                .err()
+                .map(|e| e.to_string());
+            let _ = g.refresh_graph(true).await;
+            let n = g.catch_up().await?;
+            app.emit_state().await;
+            Ok(json!({"new": n, "registry_error": registries}))
+        }
+        "profile.get" => {
+            let g = app.gallery().await?;
+            g.fetch_profiles(&[g.me()], false).await;
+            Ok(json!({"profile": g.my_profile().await.flatten(), "pubkey": g.me().to_hex()}))
+        }
+        "profile.set" => {
+            #[derive(Deserialize)]
+            struct P {
+                name: String,
+            }
+            let p: P = parse(params)?;
+            let profile = app
+                .gallery()
+                .await?
+                .set_profile(&p.name)
+                .await
+                .map_err(gallery_err)?;
+            app.emit_state().await;
+            Ok(json!(profile))
+        }
+
         // ── Servers ────────────────────────────────────────────────────
         "relays.set" => {
             #[derive(Deserialize)]
@@ -510,6 +839,63 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
     }
 }
 
+fn yes() -> bool {
+    true
+}
+
+/// The newest screenshot in the usual folder, if any.
+fn last_screenshot(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dirs = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).unwrap_or_default();
+    let mut pictures = home.join("Pictures");
+    for line in dirs.lines() {
+        if let Some(v) = line.strip_prefix("XDG_PICTURES_DIR=") {
+            let v = v
+                .trim_matches('"')
+                .replace("$HOME", &home.to_string_lossy());
+            pictures = std::path::PathBuf::from(v);
+        }
+    }
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    for dir in [pictures.join("Screenshots"), pictures] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let is_img = p.extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                ["png", "jpg", "jpeg", "webp"].contains(&x.to_ascii_lowercase().as_str())
+            });
+            if !is_img {
+                continue;
+            }
+            if let Ok(m) = e.metadata()
+                && let Ok(t) = m.modified()
+                && newest.as_ref().is_none_or(|(nt, _)| t > *nt)
+            {
+                newest = Some((t, p));
+            }
+        }
+        if newest.is_some() {
+            break;
+        }
+    }
+    newest.map(|(_, p)| p)
+}
+
+/// Gallery actions sign as you; the same Opal wording applies.
+fn gallery_err(e: anyhow::Error) -> anyhow::Error {
+    let msg = e.to_string();
+    if msg.contains("Unlock Opal") {
+        anyhow::anyhow!("Unlock Opal first: it signs for you")
+    } else if msg.contains("Opal isn't running") {
+        anyhow::anyhow!("Start Opal first: it signs for you")
+    } else if msg.contains("didn't allow") {
+        anyhow::anyhow!("Opal didn't allow it: you said no, or a rule under Apps in Opal blocks it")
+    } else {
+        e
+    }
+}
+
 /// The signer's "come back later" messages are worded for syncing.
 fn share_err(e: anyhow::Error) -> anyhow::Error {
     let msg = e.to_string();
@@ -702,7 +1088,7 @@ async fn fetch_identity(
 }
 
 /// `YYYY-MM-DD` (UTC) for a Unix time.
-fn ymd(secs: u64) -> String {
+pub fn ymd(secs: u64) -> String {
     // Howard Hinnant's days-to-civil.
     let z = (secs / 86_400) as i64 + 719_468;
     let era = z.div_euclid(146_097);

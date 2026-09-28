@@ -39,6 +39,8 @@ Item {
 
   signal message(string text, bool isError)
   signal openRequested()
+  // New likes, reviews or setups arrived (the Gallery refreshes lightly).
+  signal galleryChanged()
 
   property int _nextId: 1
   property var _callbacks: ({})
@@ -83,6 +85,7 @@ Item {
       return
     }
     if (msg.event === "state") status = msg.data || {}
+    else if (msg.event === "gallery") galleryChanged()
   }
 
   // Quickshell's Socket won't retry after a failed attempt, so each attempt

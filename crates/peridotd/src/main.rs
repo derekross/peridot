@@ -3,6 +3,8 @@
 mod api;
 mod app;
 mod config;
+mod contacts;
+mod gallery;
 mod ipc;
 mod notify;
 mod opal;

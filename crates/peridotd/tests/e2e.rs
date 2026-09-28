@@ -371,6 +371,9 @@ enum Answer {
 /// A stand-in for the Opal daemon with the local-app protocol: one account,
 /// pairing that hands out a token, `app.sign`/`app.nip44`/`app.status` that
 /// need it, a lock, and a choice of answers.
+/// What Peridot declares to Opal when pairing.
+const DECLARED: [u16; 11] = [30078, 22242, 24242, 0, 3, 5, 13, 17, 1111, 1985, 30490];
+
 struct FakeOpal {
     socket: PathBuf,
     keys: nostr_sdk::prelude::Keys,
@@ -437,8 +440,9 @@ impl FakeOpal {
                             "app.connect" => {
                                 assert_eq!(p["app"], json!("peridot"));
                                 assert_eq!(p["name"], json!("Peridot"));
-                                assert_eq!(p["kinds"], json!([30078, 22242, 24242]));
+                                assert_eq!(p["kinds"], json!(DECLARED));
                                 assert_eq!(p["nip44"], json!(true));
+                                assert_eq!(p["dm"], json!(true));
                                 if let Some(pk) = p["pubkey"].as_str() {
                                     assert_eq!(pk, k.public_key().to_hex());
                                 }
@@ -462,7 +466,7 @@ impl FakeOpal {
                                 let unsigned: UnsignedEvent =
                                     serde_json::from_value(p["event"].clone()).unwrap();
                                 let kind = unsigned.kind.as_u16();
-                                if ![30078u16, 22242, 24242].contains(&kind) {
+                                if !DECLARED.contains(&kind) {
                                     Err(format!(
                                         "Peridot didn't declare kind {kind} when it paired"
                                     ))
@@ -476,13 +480,21 @@ impl FakeOpal {
                             "app.nip44" => {
                                 let content = p["content"].as_str().unwrap();
                                 let op = p["op"].as_str().unwrap();
-                                if sensitive_no(op == "decrypt") {
+                                // The newer Opal: encrypt to someone else, for
+                                // private messages (never decrypt).
+                                let peer = p["pubkey"]
+                                    .as_str()
+                                    .map(|h| PublicKey::from_hex(h).unwrap())
+                                    .unwrap_or(k.public_key());
+                                if op == "decrypt" && peer != k.public_key() {
+                                    Err("local apps only decrypt their own data".into())
+                                } else if sensitive_no(op == "decrypt") {
                                     Err("user rejected".into())
                                 } else {
                                     let out = match op {
                                         "encrypt" => nip44::encrypt(
                                             k.secret_key(),
-                                            &k.public_key(),
+                                            &peer,
                                             content,
                                             nip44::Version::V2,
                                         )
@@ -1061,4 +1073,378 @@ async fn private_links_go_through_opal() {
         s["counts"]["in_sync"] == json!(1)
     })
     .await;
+}
+
+// ── The Gallery and private messages ────────────────────────────────
+
+/// A stand-in for the catalogue sites: GET /plugins and GET /themes.
+struct FakeSite {
+    base: String,
+}
+
+impl FakeSite {
+    async fn start(plugins: &'static str, themes: &'static str) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 4096];
+                    loop {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).to_string();
+                    let path = head.split(' ').nth(1).unwrap_or("");
+                    let body = match path {
+                        "/plugins" => plugins,
+                        "/themes" => themes,
+                        _ => "",
+                    };
+                    let status = if body.is_empty() {
+                        "404 Not Found"
+                    } else {
+                        "200 OK"
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nETag: \"v1\"\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        Self { base }
+    }
+}
+
+const PLUGINS_JSON: &str = r#"{"plugins":[
+  {"id":"derekross.calendar","name":"Calendar Clock","description":"A clock with your agenda","author":"derekross",
+   "category":"Widgets","tags":["bar","time"],"repo":"https://github.com/derekross/omarchy-calendar","stars":42,"installAvailable":true},
+  {"id":"x.other","name":"Other Thing","description":"Something else","author":"x",
+   "category":"System","tags":[],"repo":"https://github.com/x/other","stars":1,"installAvailable":true}
+]}"#;
+const THEMES_JSON: &str = r#"[
+  {"name":"Rose Pine","github_url":"https://github.com/rose/omarchy-rose-pine-theme","github_owner":"rose",
+   "description":"Soho vibes","primary_hue":"purple","is_builtin":0,"stars":40}
+]"#;
+
+/// Config for a daemon whose gallery reads the fake catalogues and the
+/// mock relay.
+fn gallery_config(relay: &str, name: &str, site: &FakeSite) -> String {
+    format!(
+        "relays = [\"{relay}\"]\ndevice_name = \"{name}\"\n[gallery]\nrelays = [\"{relay}\"]\nplugins_url = \"{0}/plugins\"\nthemes_url = \"{0}/themes\"\n",
+        site.base
+    )
+}
+
+async fn gallery_daemon(relay: &str, name: &str, site: &FakeSite, opal: Option<&Path>) -> Daemon {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(&config, gallery_config(relay, name, site)).unwrap();
+    Daemon::start_in(dir, config, opal).await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn likes_reviews_and_setups_reach_other_users_ranked_by_trust() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let site = FakeSite::start(PLUGINS_JSON, THEMES_JSON).await;
+    let desk = gallery_daemon(&url, "Desk", &site, None).await;
+    let laptop = gallery_daemon(&url, "Laptop", &site, None).await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    laptop.call("setup.start_fresh", json!(null)).await;
+    for d in [&desk, &laptop] {
+        until(d, 30, "the catalogues", |s| {
+            s["gallery"]["plugins"] == json!(2) && s["gallery"]["themes"] == json!(1)
+        })
+        .await;
+    }
+    let clock = "https://github.com/derekross/omarchy-calendar";
+
+    // Names: a fresh key has none until you pick one.
+    let p = desk.call("profile.get", json!(null)).await;
+    assert!(p["profile"].is_null(), "{p}");
+    let p = desk.call("profile.set", json!({"name": "Derek"})).await;
+    assert_eq!(p["name"], json!("Derek"));
+    let mut c = Client::open(&desk.socket).await;
+    let again = c.call("profile.set", json!({"name": "Someone else"})).await;
+    assert!(again.unwrap_err().contains("already has a name"));
+
+    // The desk likes and reviews the clock, and publishes its setup.
+    desk.call(
+        "gallery.like",
+        json!({"url": format!("{clock}.git"), "on": true}),
+    )
+    .await;
+    let r = desk
+        .call(
+            "gallery.review",
+            json!({"url": clock, "text": "Lovely", "rating": 5}),
+        )
+        .await;
+    assert_eq!(r["author"], json!("Derek"));
+    desk.write(".local/state/omarchy/current/theme.name", "rose-pine\n");
+    desk.write(
+        ".config/omarchy/themes/rose-pine/.git/config",
+        "[remote \"origin\"]\n\turl = https://github.com/rose/omarchy-rose-pine-theme.git\n",
+    );
+    desk.write(
+        ".config/omarchy/plugins/calendar/.git/config",
+        "[remote \"origin\"]\n\turl = git@github.com:derekross/omarchy-calendar.git\n",
+    );
+    let mine = desk.call("gallery.setup.mine", json!(null)).await;
+    assert_eq!(mine["can_publish"], json!(true), "{mine}");
+    assert_eq!(mine["theme"], json!("rose-pine"));
+    let setup = desk
+        .call(
+            "gallery.setup.publish",
+            json!({"title": "Derek's desk", "summary": "Rose Pine and a clock"}),
+        )
+        .await;
+    assert_eq!(
+        setup["themes"],
+        json!(["https://github.com/rose/omarchy-rose-pine-theme"])
+    );
+    assert_eq!(setup["plugins"], json!([clock]));
+    let coordinate = setup["coordinate"].as_str().unwrap().to_string();
+
+    // The laptop sees all of it, by name.
+    let desk_pubkey = desk.status().await["identity"]["pubkey"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut seen = None;
+    for _ in 0..100 {
+        let v = laptop
+            .call("gallery.list", json!({"kind": "plugin", "query": "clock"}))
+            .await;
+        let items = v["items"].as_array().cloned().unwrap_or_default();
+        if items.len() == 1 && items[0]["likes"] == json!(1) && items[0]["reviews"] == json!(1) {
+            seen = Some(items[0].clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let item = seen.expect("the laptop sees the like and the review");
+    assert_eq!(item["score"], json!(1), "a stranger's like counts once");
+    assert_eq!(item["rating"], json!(5.0));
+    assert_eq!(item["liked"], json!(false));
+    assert_eq!(item["liked_by"], json!([]));
+    let reviews = laptop.call("gallery.reviews", json!({"url": clock})).await;
+    assert_eq!(reviews[0]["author"], json!("Derek"));
+    assert_eq!(reviews[0]["text"], json!("Lovely"));
+    let setups = laptop.call("gallery.setups", json!({})).await;
+    assert_eq!(setups[0]["coordinate"], json!(coordinate));
+    assert_eq!(setups[0]["author"], json!("Derek"));
+    assert_eq!(setups[0]["installed"], json!(0));
+    assert_eq!(setups[0]["total"], json!(2));
+    // Top of the list: the liked one first, then by stars.
+    let v = laptop.call("gallery.list", json!({"kind": "plugin"})).await;
+    assert_eq!(v["items"][0]["name"], json!("Calendar Clock"));
+    assert_eq!(v["total"], json!(2));
+
+    // Following the desk makes its like weigh more, and shows its name.
+    laptop
+        .call("gallery.follow", json!({"pubkey": desk_pubkey, "on": true}))
+        .await;
+    let v = laptop
+        .call("gallery.list", json!({"kind": "plugin", "query": "clock"}))
+        .await;
+    assert_eq!(v["items"][0]["score"], json!(4), "{v}");
+    assert_eq!(v["items"][0]["liked_by"], json!(["Derek"]));
+    let s = laptop.status().await;
+    assert_eq!(s["gallery"]["following"], json!(1), "{s}");
+    let following = laptop.call("gallery.following", json!(null)).await;
+    assert_eq!(following[0]["name"], json!("Derek"));
+
+    // Taking the like back reaches the laptop too.
+    desk.call("gallery.like", json!({"url": clock, "on": false}))
+        .await;
+    let mut gone = false;
+    for _ in 0..100 {
+        let v = laptop
+            .call("gallery.list", json!({"kind": "plugin", "query": "clock"}))
+            .await;
+        if v["items"][0]["likes"] == json!(0) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(gone, "the like was taken back");
+
+    // A repository nobody listed yet can be put on the map.
+    let listed = laptop
+        .call(
+            "gallery.list_item",
+            json!({"url": "https://github.com/laptop/omarchy-mine-theme", "kind": "theme", "name": "Mine"}),
+        )
+        .await;
+    assert_eq!(listed["source"], json!("nostr"));
+    let mut found = false;
+    for _ in 0..100 {
+        let v = desk
+            .call("gallery.list", json!({"kind": "theme", "query": "mine"}))
+            .await;
+        if v["total"] == json!(1) {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(found, "the desk sees the new listing");
+}
+
+/// Read the private messages waiting for `keys` on the relay.
+async fn inbox(
+    relay: &str,
+    keys: &nostr_sdk::prelude::Keys,
+) -> Vec<nostr_sdk::prelude::UnwrappedGift> {
+    use nostr_sdk::prelude::*;
+    let client = nostr_sdk::client::Client::default();
+    client.add_relay(relay).await.unwrap();
+    client.connect().and_wait(Duration::from_secs(5)).await;
+    let filter = Filter::new().kind(Kind::GiftWrap).pubkey(keys.public_key());
+    let relay_url = RelayUrl::parse(relay).unwrap();
+    let events = client
+        .fetch_events(vec![(relay_url, vec![filter])])
+        .timeout(Duration::from_secs(10))
+        .await
+        .unwrap();
+    let mut out: Vec<UnwrappedGift> = events
+        .iter()
+        .filter_map(|e| nip59::extract_rumor(keys, e).ok())
+        .collect();
+    client.shutdown().await;
+    out.sort_by_key(|g| g.rumor.created_at);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_link_can_be_sent_as_a_private_message() {
+    use nostr_sdk::prelude::*;
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let blossom = FakeBlossom::start().await;
+    let site = FakeSite::start(PLUGINS_JSON, THEMES_JSON).await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "{}[share]\nservers = [\"{}\"]\nviewer = \"https://myperidot.app/s\"\n",
+            gallery_config(&url, "Desk", &site),
+            blossom.base
+        ),
+    )
+    .unwrap();
+    let desk = Daemon::start_configured(dir, config).await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+    let me = desk.status().await["identity"]["pubkey"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let friend = Keys::generate();
+    let share = desk.call("share.text", json!({"text": "meet at 5"})).await;
+    let link = share["url"].as_str().unwrap().to_string();
+    let r = desk
+        .call(
+            "share.send",
+            json!({"id": share["id"], "to": friend.public_key().to_bech32().unwrap()}),
+        )
+        .await;
+    assert_eq!(r["pubkey"], json!(friend.public_key().to_hex()));
+
+    let got = inbox(&url, &friend).await;
+    assert_eq!(got.len(), 1, "one message for the friend");
+    assert_eq!(got[0].sender.to_hex(), me);
+    assert_eq!(got[0].rumor.kind, Kind::PrivateDirectMessage);
+    assert!(
+        got[0].rumor.content.contains(&link),
+        "{}",
+        got[0].rumor.content
+    );
+    assert!(got[0].rumor.content.starts_with("clipboard.txt\n"));
+    // A stranger gets nothing readable.
+    assert!(inbox(&url, &Keys::generate()).await.is_empty());
+
+    // Bad addresses are refused before anything is sent.
+    let mut c = crate::Client::open(&desk.socket).await;
+    let e = c
+        .call("share.send", json!({"id": share["id"], "to": "nobody"}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("isn't an npub"), "{e}");
+    let e = c
+        .call(
+            "share.send",
+            json!({"id": 999, "to": friend.public_key().to_hex()}),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.contains("no such link"), "{e}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opal_signs_gallery_events_and_seals_messages() {
+    use nostr_sdk::prelude::*;
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let blossom = FakeBlossom::start().await;
+    let site = FakeSite::start(PLUGINS_JSON, THEMES_JSON).await;
+    let opal = FakeOpal::start("Derek").await;
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "{}[share]\nservers = [\"{}\"]\nviewer = \"https://myperidot.app/s\"\n",
+            gallery_config(&url, "Desk", &site),
+            blossom.base
+        ),
+    )
+    .unwrap();
+    let desk = Daemon::start_in(dir, config, Some(&opal.socket)).await;
+    desk.call("setup.use_opal", json!({})).await;
+    until(&desk, 30, "set up and catalogued", |s| {
+        s["set_up"] == json!(true) && s["gallery"]["plugins"] == json!(2)
+    })
+    .await;
+
+    let clock = "https://github.com/derekross/omarchy-calendar";
+    let signs = opal.signs();
+    desk.call("gallery.like", json!({"url": clock, "on": true}))
+        .await;
+    assert!(opal.signs() > signs, "Opal signed the like");
+    let v = desk
+        .call("gallery.list", json!({"kind": "plugin", "query": "clock"}))
+        .await;
+    assert_eq!(v["items"][0]["liked"], json!(true));
+
+    let friend = Keys::generate();
+    let share = desk.call("share.text", json!({"text": "hi"})).await;
+    let signs = opal.signs();
+    desk.call(
+        "share.send",
+        json!({"id": share["id"], "to": friend.public_key().to_hex()}),
+    )
+    .await;
+    assert!(opal.signs() > signs, "Opal signed the seal");
+    let got = inbox(&url, &friend).await;
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].sender, opal.keys.public_key());
 }

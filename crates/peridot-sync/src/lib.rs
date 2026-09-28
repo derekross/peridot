@@ -5,7 +5,9 @@
 
 pub mod apply;
 pub mod crypto;
+pub mod dm;
 pub mod envelope;
+pub mod gallery;
 pub mod identity;
 pub mod manifest;
 pub mod pairing;

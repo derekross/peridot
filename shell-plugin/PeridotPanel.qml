@@ -30,6 +30,7 @@ Item {
   readonly property var tabs: [
     { value: "changes", label: up && svc.attention > 0 ? "Changes " + svc.attention : "Changes" },
     { value: "shares", label: "Links" },
+    { value: "gallery", label: "Gallery" },
     { value: "computers", label: "Computers" },
     { value: "settings", label: "Settings" }
   ]
@@ -178,6 +179,7 @@ Item {
             font.pixelSize: Style.font.body
             text: {
               var o = root.svc.opal
+              if (!o) return ""
               if (o.waiting_approval) return "Approve Peridot in Opal's bar…"
               if (o.needs_pairing) return "Peridot signs as you through Opal, and Opal needs your OK again before it keeps syncing."
               return "Opal said no earlier, so Peridot is waiting before it asks again. Sync now to ask sooner, or change what Peridot may do under Apps in Opal."
@@ -186,20 +188,20 @@ Item {
           Text {
             textFormat: Text.PlainText
             width: parent.width
-            visible: !!root.svc.opal.pair_error
+            visible: !!root.svc.opal && !!root.svc.opal.pair_error
             wrapMode: Text.Wrap
             color: root.urgent
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
-            text: root.svc.opal.pair_error || ""
+            text: root.svc.opal ? (root.svc.opal.pair_error || "") : ""
           }
           Button {
-            visible: root.svc.opal.needs_pairing || root.svc.opal.waiting_approval
+            visible: !!root.svc.opal && (root.svc.opal.needs_pairing || root.svc.opal.waiting_approval)
             text: "Pair with Opal"
             iconText: "󰇈"
             bordered: true
-            iconSpinning: root.svc.opal.waiting_approval
-            enabled: !root.svc.opal.waiting_approval
+            iconSpinning: !!root.svc.opal && root.svc.opal.waiting_approval
+            enabled: !root.svc.opal || !root.svc.opal.waiting_approval
             foreground: root.foreground
             onClicked: root.svc.run("opal.pair", null, function() { root.showToast("Paired with Opal", false) })
           }
@@ -244,6 +246,14 @@ Item {
         SharesView {
           width: parent.width
           visible: root.up && root.svc.setUp && root.tab === "shares"
+          svc: root.svc
+          foreground: root.foreground
+          urgent: root.urgent
+        }
+
+        GalleryView {
+          width: parent.width
+          visible: root.up && root.svc.setUp && root.tab === "gallery"
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent

@@ -96,9 +96,83 @@ enum Cmd {
         /// Show a desktop notification instead of printing (for menus).
         #[arg(long)]
         notify: bool,
+        /// Also send the link to someone as a private message (an npub or
+        /// a name@domain address).
+        #[arg(long)]
+        to: Option<String>,
     },
     /// Your private links.
     Shares,
+    /// Send one of your links to someone as a private message.
+    Send {
+        /// The link's number from `peridot shares`.
+        id: i64,
+        /// An npub or a name@domain address.
+        to: String,
+    },
+    /// The Gallery: themes, plugins and setups from other Omarchy users.
+    Gallery {
+        /// Words to look for.
+        query: Vec<String>,
+        /// Only themes.
+        #[arg(long)]
+        themes: bool,
+        /// Only plugins.
+        #[arg(long)]
+        plugins: bool,
+        /// Setups people published.
+        #[arg(long)]
+        setups: bool,
+        /// Sort by "top" (liked by people you trust), "stars" or "name".
+        #[arg(long, default_value = "top")]
+        sort: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Like a theme or plugin (by repository address).
+    Like {
+        url: String,
+        /// Take the like back.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Review a theme or plugin.
+    Review {
+        url: String,
+        text: String,
+        /// 1 to 5.
+        #[arg(long)]
+        rating: Option<u8>,
+    },
+    /// Install a theme or plugin from the Gallery.
+    Install {
+        url: String,
+    },
+    /// Follow someone whose reviews or setups you like.
+    Follow {
+        /// An npub or a name@domain address.
+        who: String,
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Publish this computer's theme and plugins as a setup others can
+    /// install in one go.
+    PublishSetup {
+        title: String,
+        #[arg(long, default_value = "")]
+        summary: String,
+        /// Attach this picture (uploaded for everyone to see).
+        #[arg(long)]
+        screenshot: Option<PathBuf>,
+    },
+    /// Install someone's setup (its address from `peridot gallery --setups`).
+    InstallSetup {
+        coordinate: String,
+    },
+    /// The name others see in the Gallery (only if you don't have one yet).
+    Name {
+        name: String,
+    },
     /// Remove a private link and its file from the server.
     Unshare {
         id: i64,
@@ -324,6 +398,7 @@ async fn run() -> Result<()> {
             pick,
             days,
             notify,
+            to,
         } => {
             let mut targets: Vec<(String, Option<PathBuf>)> = Vec::new(); // (name, path) or text
             let mut text: Option<String> = None;
@@ -403,7 +478,8 @@ async fn run() -> Result<()> {
                 }
             }
 
-            let mut links = Vec::new();
+            let mut links: Vec<(String, String)> = Vec::new();
+            let mut ids: Vec<i64> = Vec::new();
             // With Opal holding the key, an upload may wait on its prompt.
             let via_opal = c
                 .call("status", json!(null))
@@ -440,6 +516,7 @@ async fn run() -> Result<()> {
                         s["name"].as_str().unwrap_or("clipboard").to_string(),
                         s["url"].as_str().unwrap_or("").to_string(),
                     ));
+                    ids.push(s["id"].as_i64().unwrap_or(0));
                 }
                 for (name, path) in targets {
                     let s = c
@@ -452,6 +529,15 @@ async fn run() -> Result<()> {
                         s["name"].as_str().unwrap_or("").to_string(),
                         s["url"].as_str().unwrap_or("").to_string(),
                     ));
+                    ids.push(s["id"].as_i64().unwrap_or(0));
+                }
+                if let Some(who) = &to {
+                    for id in &ids {
+                        let r = c.call("share.send", json!({"id": id, "to": who})).await?;
+                        if !notify {
+                            println!("Sent to {}.", r["to"].as_str().unwrap_or(who));
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -505,6 +591,220 @@ async fn run() -> Result<()> {
                     "Copied to the clipboard. Anyone with the link can open it until it expires; `peridot unshare` removes it sooner."
                 );
             }
+        }
+        Cmd::Send { id, to } => {
+            let r = c.call("share.send", json!({"id": id, "to": to})).await?;
+            println!(
+                "Sent {} to {}.",
+                r["name"].as_str().unwrap_or("the link"),
+                r["to"].as_str().unwrap_or(&to)
+            );
+        }
+        Cmd::Gallery {
+            query,
+            themes,
+            plugins,
+            setups,
+            sort,
+            limit,
+        } => {
+            let query = query.join(" ");
+            if setups {
+                let v = c.call("gallery.setups", json!({"query": query})).await?;
+                if cli.json {
+                    out(&v);
+                    return Ok(());
+                }
+                let list = v.as_array().cloned().unwrap_or_default();
+                if list.is_empty() {
+                    println!("No setups yet. Publish yours: `peridot publish-setup \"My desk\"`.");
+                }
+                for s in list.iter().take(limit) {
+                    let n = s["total"].as_u64().unwrap_or(0);
+                    let have = s["installed"].as_u64().unwrap_or(0);
+                    println!(
+                        "{}  by {}{}\n  {}{}\n  {} of {} installed here · install: peridot install-setup {}",
+                        s["title"].as_str().unwrap_or(""),
+                        s["author"].as_str().unwrap_or(""),
+                        if s["mine"] == json!(true) {
+                            " (you)"
+                        } else if s["following"] == json!(true) {
+                            " (you follow them)"
+                        } else {
+                            ""
+                        },
+                        s["theme"]
+                            .as_str()
+                            .map(|t| format!("theme {t} · "))
+                            .unwrap_or_default(),
+                        s["summary"].as_str().unwrap_or(""),
+                        have,
+                        n,
+                        s["coordinate"].as_str().unwrap_or("")
+                    );
+                }
+                return Ok(());
+            }
+            let kind = if themes && !plugins {
+                json!("theme")
+            } else if plugins && !themes {
+                json!("plugin")
+            } else {
+                Value::Null
+            };
+            let v = c
+                .call(
+                    "gallery.list",
+                    json!({"kind": kind, "query": query, "sort": sort, "limit": limit}),
+                )
+                .await?;
+            if cli.json {
+                out(&v);
+                return Ok(());
+            }
+            let items = v["items"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                let s = c.call("status", json!(null)).await?;
+                let g = &s["gallery"];
+                if g["themes"].as_u64().unwrap_or(0) + g["plugins"].as_u64().unwrap_or(0) == 0 {
+                    println!("The catalogues haven't loaded yet; try again in a moment.");
+                } else {
+                    println!("Nothing matches.");
+                }
+            }
+            for it in &items {
+                let likes = it["likes"].as_u64().unwrap_or(0);
+                let mut bits = vec![
+                    format!("★ {}", it["stars"].as_u64().unwrap_or(0)),
+                    format!("♥ {likes}"),
+                ];
+                if let Some(r) = it["rating"].as_f64() {
+                    bits.push(format!(
+                        "{r:.1}/5 from {} review(s)",
+                        it["reviews"].as_u64().unwrap_or(0)
+                    ));
+                }
+                if it["installed"] == json!(true) {
+                    bits.push("installed".into());
+                }
+                if it["liked"] == json!(true) {
+                    bits.push("you like this".into());
+                }
+                let by = it["liked_by"].as_array().cloned().unwrap_or_default();
+                if !by.is_empty() {
+                    bits.push(format!(
+                        "liked by {}",
+                        by.iter()
+                            .filter_map(|n| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                }
+                println!(
+                    "{} ({})  by {} · {}\n  {}\n  {}",
+                    it["name"].as_str().unwrap_or(""),
+                    it["kind"].as_str().unwrap_or(""),
+                    it["author"].as_str().unwrap_or(""),
+                    bits.join(" · "),
+                    it["url"].as_str().unwrap_or(""),
+                    it["description"].as_str().unwrap_or("")
+                );
+            }
+            let total = v["total"].as_u64().unwrap_or(0);
+            if total as usize > items.len() {
+                println!(
+                    "({} more; narrow it down with words, or --limit)",
+                    total as usize - items.len()
+                );
+            }
+        }
+        Cmd::Like { url, undo } => {
+            c.call("gallery.like", json!({"url": url, "on": !undo}))
+                .await?;
+            println!("{}", if undo { "Like taken back." } else { "Liked." });
+        }
+        Cmd::Review { url, text, rating } => {
+            c.call(
+                "gallery.review",
+                json!({"url": url, "text": text, "rating": rating}),
+            )
+            .await?;
+            println!("Review posted.");
+        }
+        Cmd::Install { url } => {
+            let v = c.call("gallery.item", json!({"url": url})).await?;
+            let kind = v["item"]["kind"].as_str().unwrap_or("plugin").to_string();
+            println!(
+                "Installing the {} {kind}…",
+                v["item"]["name"].as_str().unwrap_or("")
+            );
+            c.call("gallery.install", json!({"url": url, "kind": kind}))
+                .await?;
+            println!("Done.");
+        }
+        Cmd::Follow { who, undo } => {
+            let r = c.call("contacts.resolve", json!({"who": who})).await?;
+            c.call(
+                "gallery.follow",
+                json!({"pubkey": r["pubkey"], "on": !undo}),
+            )
+            .await?;
+            println!(
+                "{} {}.",
+                if undo { "Unfollowed" } else { "Following" },
+                r["name"].as_str().unwrap_or(&who)
+            );
+        }
+        Cmd::PublishSetup {
+            title,
+            summary,
+            screenshot,
+        } => {
+            let screenshot = match screenshot {
+                Some(p) => {
+                    Some(std::fs::canonicalize(&p).with_context(|| format!("{}", p.display()))?)
+                }
+                None => None,
+            };
+            let mine = c.call("gallery.setup.mine", json!(null)).await?;
+            if mine["can_publish"] != json!(true) {
+                bail!("nothing to publish yet: no theme or plugin from git on this computer");
+            }
+            let r = c
+                .call(
+                    "gallery.setup.publish",
+                    json!({"title": title, "summary": summary, "screenshot": screenshot}),
+                )
+                .await?;
+            println!(
+                "Published \"{}\": {} theme(s) and {} plugin(s){}.",
+                r["title"].as_str().unwrap_or(""),
+                r["themes"].as_array().map(Vec::len).unwrap_or(0),
+                r["plugins"].as_array().map(Vec::len).unwrap_or(0),
+                r["theme"]
+                    .as_str()
+                    .map(|t| format!(", theme {t}"))
+                    .unwrap_or_default()
+            );
+        }
+        Cmd::InstallSetup { coordinate } => {
+            println!("Installing… (each theme and plugin is one Omarchy command)");
+            let r = c
+                .call("gallery.setup.install", json!({"coordinate": coordinate}))
+                .await?;
+            let done = r["done"].as_array().map(Vec::len).unwrap_or(0);
+            let failed = r["failed"].as_array().cloned().unwrap_or_default();
+            println!("{done} step(s) done, {} failed.", failed.len());
+            for f in failed {
+                println!("  {}: {}", f["step"], f["error"].as_str().unwrap_or(""));
+            }
+        }
+        Cmd::Name { name } => {
+            let p = c.call("profile.set", json!({"name": name})).await?;
+            println!(
+                "Others now see you as {}.",
+                p["name"].as_str().unwrap_or(&name)
+            );
         }
         Cmd::Opal { cmd: OpalCmd::Pair } => {
             println!("{OPAL_WILL_ASK}");

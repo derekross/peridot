@@ -29,8 +29,13 @@ use zeroize::Zeroizing;
 pub const APP_KEY: &str = "peridot";
 pub const APP_NAME: &str = "Peridot";
 /// The event kinds Peridot signs: its synced data (NIP-78), relay logins
-/// (NIP-42) and Blossom upload/delete authorizations (private links).
-pub const KINDS: [u16; 3] = [30078, 22242, 24242];
+/// (NIP-42), Blossom upload/delete authorizations (private links), and the
+/// Gallery's public events: a profile, your follow list, taking something
+/// back, seals for private messages, likes, reviews, listings and setups.
+pub const KINDS: [u16; 11] = [30078, 22242, 24242, 0, 3, 5, 13, 17, 1111, 1985, 30490];
+/// Kinds Opal treats as sensitive: it asks each time unless you allowed it
+/// for a while, so the panel says "look at Opal".
+const PROMPT_KINDS: [u16; 6] = [22242, 24242, 0, 3, 5, 13];
 
 /// Long enough for you to read and answer a prompt in Opal's bar.
 pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -207,6 +212,8 @@ impl OpalClient {
             "name": APP_NAME,
             "kinds": KINDS,
             "nip44": true,
+            // Private messages: NIP-44 to the recipient's key.
+            "dm": true,
         });
         if let Some(pk) = pubkey {
             params["pubkey"] = json!(pk.to_hex());
@@ -371,7 +378,24 @@ impl OpalClient {
     /// replaced (a request in flight during a re-pair) says nothing about
     /// the new one.
     fn classify(&self, msg: &str, mode: Mode, used: &str) -> SignError {
-        if msg.contains("not paired") || msg.contains("different program") {
+        if msg.contains("didn't declare kind")
+            || msg.contains("didn't ask to send private messages")
+        {
+            // A pairing from an older Peridot: Opal needs to hear the new
+            // list. Same road as a lost token: pair again.
+            let current = self
+                .0
+                .token
+                .read()
+                .unwrap_or_else(|p| p.into_inner())
+                .as_deref()
+                .map(String::as_str)
+                == Some(used);
+            if current {
+                self.mark_unpaired();
+            }
+            SignError::Unavailable(PAIR_AGAIN_NEW.into())
+        } else if msg.contains("not paired") || msg.contains("different program") {
             let current = self
                 .0
                 .token
@@ -424,6 +448,7 @@ impl OpalClient {
 }
 
 const PAIR_AGAIN: &str = "Pair Peridot with Opal to keep syncing";
+const PAIR_AGAIN_NEW: &str = "Pair Peridot with Opal again: this version of Peridot asks for new permissions (the Gallery and private messages)";
 
 fn hold_text(until: u64, method: &str) -> String {
     let what = if method == "app.nip44" {
@@ -487,14 +512,23 @@ impl OpalSigner {
         }
     }
 
-    async fn nip44(&self, op: &str, content: String) -> Result<String, SignError> {
+    async fn nip44(
+        &self,
+        op: &str,
+        content: String,
+        peer: Option<PublicKey>,
+    ) -> Result<String, SignError> {
+        let mut params = json!({"op": op, "content": content});
+        if let Some(pk) = peer {
+            params["pubkey"] = json!(pk.to_hex());
+        }
         let v = self
             .client
             .app_call(
                 "app.nip44",
-                json!({"op": op, "content": content}),
+                params,
                 self.mode,
-                op == "decrypt",
+                op == "decrypt" || peer.is_some(),
             )
             .await?;
         v["content"]
@@ -509,7 +543,7 @@ impl EventSigner for OpalSigner {
         Box::pin(async move {
             let kind = unsigned.kind.as_u16();
             // Sensitive kinds: Opal asks unless allowed for a while.
-            let prompt_prone = kind == 22242 || kind == 24242;
+            let prompt_prone = PROMPT_KINDS.contains(&kind);
             let v = self
                 .client
                 .app_call(
@@ -539,11 +573,19 @@ impl IdentitySigner for OpalSigner {
     }
 
     fn nip44_self_encrypt(&self, plaintext: String) -> BoxFuture<'_, Result<String, SignError>> {
-        Box::pin(async move { self.nip44("encrypt", plaintext).await })
+        Box::pin(async move { self.nip44("encrypt", plaintext, None).await })
     }
 
     fn nip44_self_decrypt(&self, payload: String) -> BoxFuture<'_, Result<String, SignError>> {
-        Box::pin(async move { self.nip44("decrypt", payload).await })
+        Box::pin(async move { self.nip44("decrypt", payload, None).await })
+    }
+
+    fn nip44_encrypt_to(
+        &self,
+        peer: PublicKey,
+        plaintext: String,
+    ) -> BoxFuture<'_, Result<String, SignError>> {
+        Box::pin(async move { self.nip44("encrypt", plaintext, Some(peer)).await })
     }
 
     /// Until the first data signature after pairing, Opal may still be
@@ -639,14 +681,13 @@ mod tests {
             &t
         )));
         assert!(c.is_held());
-        assert!(matches!(
-            c.classify(
-                "Peridot didn't declare kind 1 when it paired",
-                Mode::Background,
-                &t
-            ),
-            SignError::Failed(_)
-        ));
+        // A pairing from an older Peridot: pair again, like a lost token.
+        assert!(unavailable(c.classify(
+            "Peridot didn't declare kind 17 when it paired",
+            Mode::Background,
+            &t
+        )));
+        assert!(c.needs_pairing());
     }
 
     #[tokio::test]

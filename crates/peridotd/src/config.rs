@@ -46,9 +46,47 @@ pub struct ShareConfig {
 impl Default for ShareConfig {
     fn default() -> Self {
         Self {
-            servers: DEFAULT_SHARE_SERVERS.iter().map(|s| s.to_string()).collect(),
+            servers: DEFAULT_SHARE_SERVERS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
             expire_days: 7,
             viewer: "https://myperidot.app/s".into(),
+        }
+    }
+}
+
+/// Public relays the Gallery reads and writes (likes, reviews, setups,
+/// follows). Private-data relays that want a login aren't needed here.
+pub const DEFAULT_GALLERY_RELAYS: &[&str] = &[
+    "wss://relay.ditto.pub",
+    "wss://relay.damus.io",
+    "wss://relay.primal.net",
+    "wss://nos.lol",
+];
+
+/// The Gallery: themes, plugins and setups from other Omarchy users.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GalleryConfig {
+    pub enabled: bool,
+    pub relays: Vec<String>,
+    /// The plugin marketplace's catalogue.
+    pub plugins_url: String,
+    /// The community theme site's data.
+    pub themes_url: String,
+}
+
+impl Default for GalleryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            relays: DEFAULT_GALLERY_RELAYS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            plugins_url: crate::gallery::registry::PLUGINS_URL.into(),
+            themes_url: crate::gallery::registry::THEMES_URL.into(),
         }
     }
 }
@@ -68,6 +106,7 @@ pub struct Config {
     /// Pause syncing.
     pub paused: bool,
     pub share: ShareConfig,
+    pub gallery: GalleryConfig,
 }
 
 impl Default for Config {
@@ -79,6 +118,7 @@ impl Default for Config {
             auto_apply: false,
             paused: false,
             share: ShareConfig::default(),
+            gallery: GalleryConfig::default(),
         }
     }
 }

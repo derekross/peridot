@@ -11,6 +11,12 @@ pub trait IdentitySigner: EventSigner {
     fn pubkey(&self) -> PublicKey;
     fn nip44_self_encrypt(&self, plaintext: String) -> BoxFuture<'_, Result<String, SignError>>;
     fn nip44_self_decrypt(&self, payload: String) -> BoxFuture<'_, Result<String, SignError>>;
+    /// NIP-44 to someone else's key: what a private message to them needs.
+    fn nip44_encrypt_to(
+        &self,
+        peer: PublicKey,
+        plaintext: String,
+    ) -> BoxFuture<'_, Result<String, SignError>>;
     /// How long the sync engine waits for one signature. A signer that may
     /// ask the user (Opal, before its rules are in place) needs longer.
     fn sign_timeout(&self) -> std::time::Duration {
@@ -52,6 +58,17 @@ impl IdentitySigner for LocalSigner {
     fn nip44_self_decrypt(&self, payload: String) -> BoxFuture<'_, Result<String, SignError>> {
         Box::pin(async move {
             nip44::decrypt(self.0.secret_key(), &self.0.public_key(), &payload)
+                .map_err(|e| SignError::Failed(e.to_string()))
+        })
+    }
+
+    fn nip44_encrypt_to(
+        &self,
+        peer: PublicKey,
+        plaintext: String,
+    ) -> BoxFuture<'_, Result<String, SignError>> {
+        Box::pin(async move {
+            nip44::encrypt(self.0.secret_key(), &peer, plaintext, nip44::Version::V2)
                 .map_err(|e| SignError::Failed(e.to_string()))
         })
     }
