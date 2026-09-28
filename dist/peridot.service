@@ -12,33 +12,73 @@ ExecStart=%h/.local/bin/peridotd
 Restart=on-failure
 RestartSec=3
 
-# Hardening. Peridot writes the settings it syncs (in ~/.config, and
-# ~/.XCompose / ~/.bashrc if you sync them), so your home folder stays
-# writable; the rest of the system is read-only. It needs the session bus
-# (keyring) and the network; installing a theme or plugin you accepted runs
-# through systemd-run, outside this sandbox.
+# Hardening. The rest of the system is read-only, and so is your home folder
+# except for the places Peridot writes: the settings it syncs (under
+# ~/.config, plus ~/.XCompose and ~/.bashrc if you sync them), its own data,
+# its socket, and your Documents folder for the recovery kit. It needs the
+# session bus (keyring, and asking systemd to run an install) and the
+# network. Installing a theme or plugin you accepted runs as
+# peridot-install@.service, outside this sandbox.
 NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
 ProtectSystem=strict
-ReadWritePaths=%h %t
+ProtectHome=read-only
+# Synced settings live under ~/.config (the roots in manifest.rs: hypr,
+# omarchy, the terminals, btop, tmux, lazygit, mpv, nvim, git, and the single
+# files starship.toml and mimeapps.list). The folder as a whole, not each
+# root: Peridot creates a root that isn't there yet when the first file for
+# it arrives, and writes single files by rename, which a per-file mount
+# would refuse.
+ReadWritePaths=%h/.config
+# The two top-level files (they must exist to be mounted; "-" skips them
+# otherwise). A file mount takes writes in place only; Peridot writes by
+# rename, so until it writes these two in place they can't be applied here.
+ReadWritePaths=-%h/.XCompose -%h/.bashrc
+# Peridot's own database and cache (the install record under
+# ~/.local/state/peridot is the installer's, not the daemon's).
+ReadWritePaths=-%h/.local/share/peridot -%h/.cache/peridot
+# The control socket, and the recovery kit page.
+ReadWritePaths=%t
+ReadWritePaths=-%h/Documents
+# Inside ~/.config, what Peridot never writes: where the session starts
+# programs from, and the folders manifest.rs never syncs. Skipped when
+# absent.
+ReadOnlyPaths=-%h/.config/systemd -%h/.config/autostart -%h/.config/environment.d
+ReadOnlyPaths=-%h/.config/sops -%h/.config/gh -%h/.config/rclone -%h/.config/vdirsyncer
+ReadOnlyPaths=-%h/.config/khal -%h/.config/khard -%h/.config/opencode -%h/.config/opal
+ReadOnlyPaths=-%h/.config/Signal -%h/.config/BraveSoftware -%h/.config/chromium
+ReadOnlyPaths=-%h/.config/omarchy/plugins -%h/.config/omarchy/themes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+# Not ProtectProc=invisible / ProcSubset=pid: a user service can't remount
+# /proc, so they'd do nothing here, and hiding other processes would also
+# blind the socket's check of who is calling (/proc/<pid>/exe).
 RestrictRealtime=yes
+RestrictNamespaces=yes
+# No AF_NETLINK: name lookups work without it (glibc falls back).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 # Not RestrictSUIDSGID: systemd can't inspect openat2's mode (it lives in a
 # struct), so that option blocks openat2 entirely, and Peridot relies on it
 # to open files safely beneath your home. Peridot strips setuid/setgid bits
 # from everything it writes instead.
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
+# No System V or POSIX IPC: PrivateIPC gives the service its own, empty
+# namespace; RemoveIPC only acts in the system manager and is here for the
+# record.
+PrivateIPC=yes
+RemoveIPC=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-RestrictNamespaces=yes
-ProtectClock=yes
-ProtectHostname=yes
-ProtectKernelLogs=yes
 # Your key lives in this process: never write core dumps.
 LimitCORE=0
 UMask=0077
