@@ -14,7 +14,7 @@ export ROOT T="$ROOT/tests/install"
 BINS="$(mktemp -d)"
 mkdir -p "$BINS/release"
 if [[ -n ${PERIDOT_TEST_BINARIES:-} ]]; then
-  cp -- "$PERIDOT_TEST_BINARIES/peridotd" "$PERIDOT_TEST_BINARIES/opal" "$BINS/release/"
+  cp -- "$PERIDOT_TEST_BINARIES/peridotd" "$PERIDOT_TEST_BINARIES/peridot" "$BINS/release/"
 else
   printf '#!/bin/sh\necho fake peridotd %s\n' "$RANDOM" >"$BINS/release/peridotd"
   printf '#!/bin/sh\necho fake peridot %s\n' "$RANDOM" >"$BINS/release/peridot"

@@ -10,7 +10,8 @@
 # Record: ${XDG_STATE_HOME:-~/.local/state}/peridot/installed.tsv, one
 # "<sha256><TAB><absolute path>" per file Peridot wrote, plus
 # "backup<TAB><original><TAB><backup>" for files moved aside with your
-# consent. Backups under state/peridot/backup/ are never deleted by Peridot.
+# consent, and "menu<TAB><file><TAB><sha256>" per line Peridot added to
+# Omarchy's Share menu file (a file it edits, but doesn't own). Backups under state/peridot/backup/ are never deleted by Peridot.
 #
 # What stays imprecise, on purpose (documented in the README):
 # parent folders are resolved the way the OS does (a symlinked ~/.local/bin
@@ -84,13 +85,16 @@ mv --help 2>/dev/null | grep -q -- '--exchange' && MV_EXCHANGE=1
 # ── The install record ─────────────────────────────────────────────────
 declare -A MANIFEST_HASH=()   # absolute path -> sha256
 BACKUP_LINES=()               # "original<TAB>backup"
+declare -A MENU_LINE_HASH=()  # "<menu file><TAB><sha256 of one line Peridot wrote>" -> 1
 load_manifest() {
-  MANIFEST_HASH=(); BACKUP_LINES=()
+  MANIFEST_HASH=(); BACKUP_LINES=(); MENU_LINE_HASH=()
   [[ -f $MANIFEST && ! -L $MANIFEST ]] || return 0
   local h p extra
   while IFS=$'\t' read -r h p extra || [[ -n $h ]]; do
     if [[ $h == backup ]]; then
       [[ $p == /* && $extra == /* ]] && BACKUP_LINES+=("$p"$'\t'"$extra")
+    elif [[ $h == menu ]]; then
+      [[ $p == /* && $extra =~ ^[0-9a-f]{64}$ ]] && MENU_LINE_HASH["$p"$'\t'"$extra"]=1
     elif [[ $h =~ ^[0-9a-f]{64}$ && $p == /* && -z $extra ]]; then
       MANIFEST_HASH["$p"]=$h
     else
@@ -99,8 +103,8 @@ load_manifest() {
   done <"$MANIFEST"
 }
 write_manifest() {
-  local tmp p b
-  if (( ${#MANIFEST_HASH[@]} == 0 && ${#BACKUP_LINES[@]} == 0 )); then
+  local tmp p b k
+  if (( ${#MANIFEST_HASH[@]} == 0 && ${#BACKUP_LINES[@]} == 0 && ${#MENU_LINE_HASH[@]} == 0 )); then
     rm -f -- "$MANIFEST"
     return 0
   fi
@@ -109,6 +113,7 @@ write_manifest() {
   {
     for p in "${!MANIFEST_HASH[@]}"; do printf '%s\t%s\n' "${MANIFEST_HASH[$p]}" "$p"; done | LC_ALL=C sort -t $'\t' -k2
     for b in "${BACKUP_LINES[@]}"; do printf 'backup\t%s\n' "$b"; done
+    for k in "${!MENU_LINE_HASH[@]}"; do printf 'menu\t%s\n' "$k"; done | LC_ALL=C sort
   } >"$tmp"
   chmod 600 -- "$tmp"
   mv -T -- "$tmp" "$MANIFEST"
@@ -188,12 +193,13 @@ owned_file() {
 }
 
 # ── Backups, replacing, removing ───────────────────────────────────────
-# backup_file <path> <name>: moves the file into the backup folder under a
-# name nobody else has, records it, and leaves the new path in BACKUP_DEST
-# (not printed: a subshell couldn't update the record).
+# backup_file <path> <name> [original]: moves the file into the backup
+# folder under a name nobody else has, records it (as <original> when the
+# file was already swapped out of its place), and leaves the new path in
+# BACKUP_DEST (not printed: a subshell couldn't update the record).
 BACKUP_DEST=
 backup_file() {
-  local src=$1 name=$2 ts n=0 dest
+  local src=$1 name=$2 orig=${3:-$1} ts n=0 dest
   ts="$(date +%Y%m%dT%H%M%S)"
   mkdir -p -m 700 -- "$BACKUPDIR"
   while :; do
@@ -202,7 +208,7 @@ backup_file() {
     (( n++ )); (( n > 999 )) && die "couldn't find a free backup name in $BACKUPDIR"
   done
   mv -T -- "$src" "$dest"
-  BACKUP_LINES+=("$src"$'\t'"$dest")
+  BACKUP_LINES+=("$orig"$'\t'"$dest")
   write_manifest
   BACKUP_DEST=$dest
 }
@@ -236,7 +242,7 @@ replace_owned() {
       mv -T -- "$tmp" "$dest"
     fi
     if [[ -L $out || "$(file_hash "$out")" != "$expect" ]]; then
-      backup_file "$out" "$(basename -- "$dest")"
+      backup_file "$out" "$(basename -- "$dest")" "$dest"
       note "$dest changed after it was checked; what was there is kept in $BACKUP_DEST"
     else
       rm -f -- "$out"
@@ -252,7 +258,7 @@ remove_owned() {
   out="$(mktemp -u -- "$(dirname -- "$p")/.peridot.XXXXXX")"
   mv -T -- "$p" "$out" || { note "couldn't move $p aside; left as is."; return 1; }
   if [[ -L $out || "$(file_hash "$out")" != "$expect" ]]; then
-    backup_file "$out" "$(basename -- "$p")"
+    backup_file "$out" "$(basename -- "$p")" "$p"
     note "$p changed after it was checked; kept in $BACKUP_DEST"
   else
     rm -f -- "$out"
@@ -458,65 +464,169 @@ binary_state() {
 # ── The Share menu ─────────────────────────────────────────────────────
 # Peridot can add "Private link" entries to Omarchy's Share menu. That file
 # is yours (~/.config/omarchy/extensions/omarchy-menu.jsonc), so install.sh
-# edits it only with your consent, keeps a backup, and uninstall.sh takes
-# out only lines that are still exactly the ones Peridot put in.
+# edits it only with your consent and keeps a backup; uninstall.sh takes
+# out only lines that are still exactly the ones Peridot put in. Which
+# lines those are is decided by their bytes, never by a marker: each line
+# Peridot writes is recorded in the install record ("menu<TAB><file>
+# <TAB><sha256 of the line>"), and a line whose hash is recorded (or that
+# is exactly a line this checkout would write, for installs made before
+# the record had menu lines) is Peridot's. A line that mentions Peridot
+# but matches neither is one you changed: it is kept, and named.
+#
+# Every edit is a swap: the file is copied, the new content is composed
+# from the copy, the file is checked to be still the copy, swapped for the
+# new content, and the bytes that came out are checked again; if they
+# aren't the copy after all, the swap is undone and nothing changed.
 menu_lines() { cat dist/omarchy-menu.jsonc; }
-menu_has_entries() { [[ -f $MENU && ! -L $MENU ]] && grep -qF '"trigger.share.peridot"' "$MENU"; }
-MENU_STATE=missing   # missing | symlink | other | present | absent
+line_hash() { printf '%s' "$1" | hash_stdin; }
+declare -A MENU_KNOWN=()   # sha256 of a line -> 1, for the lines this checkout writes
+load_menu_known() {
+  local line
+  MENU_KNOWN=()
+  while IFS= read -r line || [[ -n $line ]]; do MENU_KNOWN["$(line_hash "$line")"]=1; done < <(menu_lines)
+}
+# menu_line_owned <line>: 0 iff the line is recorded as written to $MENU, or
+# is exactly one this checkout writes.
+menu_line_owned() {
+  local h; h="$(line_hash "$1")"
+  [[ -n ${MENU_LINE_HASH["$MENU"$'\t'"$h"]:-} || -n ${MENU_KNOWN[$h]:-} ]]
+}
+# Counts over the file: MENU_OWNED lines that are Peridot's, MENU_CHANGED
+# lines that mention Peridot's entries but aren't.
+MENU_OWNED=0 MENU_CHANGED=0
+menu_count() {
+  local line
+  MENU_OWNED=0 MENU_CHANGED=0
+  [[ -f $1 && ! -L $1 ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    if menu_line_owned "$line"; then MENU_OWNED=$((MENU_OWNED + 1))
+    elif [[ $line == *'"trigger.share.peridot'* ]]; then MENU_CHANGED=$((MENU_CHANGED + 1)); fi
+  done <"$1"
+}
+menu_has_entries() { menu_count "$MENU"; (( MENU_OWNED > 0 )); }
+MENU_STATE=missing   # missing | other | present | edited | absent
 inspect_menu() {
+  (( ${#MENU_KNOWN[@]} )) || load_menu_known
   case "$(path_kind "$MENU")" in
     missing) MENU_STATE=missing ;;
     symlink | dir | other) MENU_STATE=other ;;
-    file) if menu_has_entries; then MENU_STATE=present; else MENU_STATE=absent; fi ;;
+    file)
+      menu_count "$MENU"
+      if (( MENU_OWNED > 0 )); then MENU_STATE=present
+      elif (( MENU_CHANGED > 0 )); then MENU_STATE=edited
+      else MENU_STATE=absent; fi ;;
   esac
+}
+# menu_swap_in <new content file> <hash the file must still have>: puts
+# the new content at $MENU only if $MENU is still exactly the bytes the new
+# content was composed from, checking again after the swap. On success the
+# old file is at MENU_OUT (yours to back up or remove); on failure nothing
+# changed, and it says so. The new file must be in $MENU's folder.
+MENU_OUT=
+menu_swap_in() {
+  local new=$1 expect=$2 want out dir
+  dir="$(dirname -- "$MENU")"
+  want="$(file_hash "$new")"
+  MENU_OUT=
+  if [[ -L $MENU || ! -f $MENU || "$(file_hash "$MENU")" != "$expect" ]]; then
+    rm -f -- "$new"; note "$MENU changed while it was being edited; not touched. Run this again."; return 1
+  fi
+  if (( MV_EXCHANGE )) && mv --exchange -T -- "$new" "$MENU" 2>/dev/null; then
+    out=$new
+    if [[ -L $out || "$(file_hash "$out")" != "$expect" ]]; then
+      # It changed between the check and the swap: put it back.
+      mv --exchange -T -- "$out" "$MENU" 2>/dev/null || mv -T -- "$out" "$MENU"
+      rm -f -- "$new"; note "$MENU changed while it was being edited; not touched. Run this again."; return 1
+    fi
+  else
+    # No atomic exchange: two renames, a moment with nothing at $MENU.
+    out="$(mktemp -u -- "$dir/.peridot.XXXXXX")"
+    mv -T -- "$MENU" "$out" || { rm -f -- "$new"; note "couldn't move $MENU aside; not edited."; return 1; }
+    if [[ "$(file_hash "$out")" != "$expect" ]]; then
+      mv -T -- "$out" "$MENU"; rm -f -- "$new"; note "$MENU changed while it was being edited; not touched. Run this again."; return 1
+    fi
+    mv -T -- "$new" "$MENU"
+  fi
+  MENU_OUT=$out
+  if [[ "$(file_hash "$MENU")" != "$want" ]]; then
+    # Can't happen without a third party writing in the same instant; say so rather than record it.
+    note "$MENU isn't what was just written to it; check it by hand ($out holds the previous content)."
+    return 1
+  fi
 }
 # Add the entries before the closing brace (the file is JSONC with
 # comments, so it is edited as text), or create the file. Backs up an
-# existing file first.
+# existing file first; records every line written.
 menu_add_entries() {
-  local tmp text end head
-  mkdir -p -- "$(dirname -- "$MENU")"
-  tmp="$(mktemp -- "$(dirname -- "$MENU")/.peridot.XXXXXX")"; TEMPS+=("$tmp")
+  local tmp snap text end head h0 line dir
+  dir="$(dirname -- "$MENU")"
+  mkdir -p -- "$dir"
+  (( ${#MENU_KNOWN[@]} )) || load_menu_known
+  tmp="$(mktemp -- "$dir/.peridot.XXXXXX")"; TEMPS+=("$tmp")
   if [[ $MENU_STATE == missing ]]; then
     { echo "{"; menu_lines; echo "}"; } >"$tmp"
     chmod 644 -- "$tmp"
     ln -- "$tmp" "$MENU" 2>/dev/null || { rm -f -- "$tmp"; note "$MENU appeared meanwhile; not written."; return 1; }
     rm -f -- "$tmp"
-    MANIFEST_HASH["$MENU"]="$(file_hash "$MENU")"; write_manifest
+    MANIFEST_HASH["$MENU"]="$(file_hash "$MENU")"
+    while IFS= read -r line || [[ -n $line ]]; do MENU_LINE_HASH["$MENU"$'\t'"$(line_hash "$line")"]=1; done < <(menu_lines)
+    write_manifest
     note "created $MENU with the Private link entries"
     return 0
   fi
-  cp -p -- "$MENU" "$tmp"
-  text="$(cat -- "$MENU"; printf x)"; text=${text%x}
+  snap="$(mktemp -- "$dir/.peridot.XXXXXX")"; TEMPS+=("$snap")
+  cp -p -- "$MENU" "$snap"
+  h0="$(file_hash "$snap")"
+  text="$(cat -- "$snap"; printf x)"; text=${text%x}
   head=${text%\}*}
-  [[ $head != "$text" ]] || { rm -f -- "$tmp"; note "$MENU has no closing brace; not edited."; return 1; }
+  [[ $head != "$text" ]] || { rm -f -- "$tmp" "$snap"; note "$MENU has no closing brace; not edited."; return 1; }
   end=${text:${#head}}
   head="${head%"${head##*[![:space:]]}"}"
   case $head in *"{" | *",") head="$head"$'\n' ;; *) head="$head,"$'\n' ;; esac
   { printf '%s' "$head"; menu_lines; printf '%s' "$end"; } >"$tmp"
-  backup_file "$MENU" omarchy-menu.jsonc
+  chmod --reference="$snap" -- "$tmp" 2>/dev/null || true
+  menu_swap_in "$tmp" "$h0" || { rm -f -- "$snap"; return 1; }
+  rm -f -- "$snap"
+  backup_file "$MENU_OUT" omarchy-menu.jsonc "$MENU"
   note "the previous $MENU is kept in $BACKUP_DEST"
-  mv -T -- "$tmp" "$MENU"
+  while IFS= read -r line || [[ -n $line ]]; do MENU_LINE_HASH["$MENU"$'\t'"$(line_hash "$line")"]=1; done < <(menu_lines)
+  write_manifest
   note "added the Private link entries to $MENU"
 }
 # Take out the lines that are still exactly Peridot's; leave everything
 # else, and say if some of Peridot's lines were changed and so stayed.
 menu_remove_entries() {
-  local tmp kept=0 removed=0 line
-  local -A ours=()
-  while IFS= read -r line || [[ -n $line ]]; do ours["$line"]=1; done < <(menu_lines)
-  tmp="$(mktemp -- "$(dirname -- "$MENU")/.peridot.XXXXXX")"; TEMPS+=("$tmp")
+  local tmp snap kept=0 removed=0 line h0 dir
+  dir="$(dirname -- "$MENU")"
+  (( ${#MENU_KNOWN[@]} )) || load_menu_known
+  snap="$(mktemp -- "$dir/.peridot.XXXXXX")"; TEMPS+=("$snap")
+  cp -p -- "$MENU" "$snap"
+  h0="$(file_hash "$snap")"
+  tmp="$(mktemp -- "$dir/.peridot.XXXXXX")"; TEMPS+=("$tmp")
   while IFS= read -r line || [[ -n $line ]]; do
-    if [[ -n ${ours[$line]:-} ]]; then removed=$((removed + 1)); continue; fi
+    if menu_line_owned "$line"; then removed=$((removed + 1)); continue; fi
     [[ $line == *'"trigger.share.peridot'* ]] && kept=$((kept + 1))
     printf '%s\n' "$line"
-  done <"$MENU" >"$tmp"
-  if (( removed == 0 )); then rm -f -- "$tmp"; note "$MENU: none of Peridot's lines are there unchanged; left as it is."; return 0; fi
-  chmod --reference="$MENU" -- "$tmp" 2>/dev/null || true
-  mv -T -- "$tmp" "$MENU"
+  done <"$snap" >"$tmp"
+  if (( removed == 0 )); then
+    rm -f -- "$tmp" "$snap"
+    note "$MENU: none of Peridot's lines are there unchanged; left as it is."
+    (( kept )) && note "$kept Peridot menu line(s) you changed were kept; edit them out yourself if you like."
+    return 0
+  fi
+  chmod --reference="$snap" -- "$tmp" 2>/dev/null || true
+  menu_swap_in "$tmp" "$h0" || { rm -f -- "$snap"; return 1; }
+  rm -f -- "$snap" "$MENU_OUT"
   note "removed $removed Private link line(s) from $MENU"
   (( kept )) && note "$kept Peridot menu line(s) you changed were kept; edit them out yourself if you like."
+  forget_menu_lines
   return 0
+}
+# Drop the record of menu lines for $MENU.
+forget_menu_lines() {
+  local k
+  for k in "${!MENU_LINE_HASH[@]}"; do [[ $k == "$MENU"$'\t'* ]] && unset 'MENU_LINE_HASH[$k]'; done
+  write_manifest
 }
 
 # ── Release binaries ───────────────────────────────────────────────────

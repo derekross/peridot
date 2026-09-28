@@ -29,7 +29,7 @@ said() { grep -qF -- "$1" "$HOME/out.txt"; }
 logged() { grep -qF -- "$1" "$FAKE_LOG"; }
 not_logged() { ! grep -qF -- "$1" "$FAKE_LOG"; }
 manifest_lists() { [[ -f $M ]] && awk -F'\t' -v p="$1" '$2 == p { found = 1 } END { exit !found }' "$M"; }
-manifest_verifies() { [[ -f $M ]] && awk -F'\t' '$1 != "backup" { print $1 "  " $2 }' "$M" | (cd / && sha256sum -c --quiet --strict >/dev/null 2>&1); }
+manifest_verifies() { [[ -f $M ]] && awk -F'\t' '$1 != "backup" && $1 != "menu" { print $1 "  " $2 }' "$M" | (cd / && sha256sum -c --quiet --strict >/dev/null 2>&1); }
 same() { cmp -s -- "$1" "$2"; }
 
 CASE=""

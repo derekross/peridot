@@ -245,6 +245,7 @@ esac
 
 case $MENU_STATE in
   present) say "Share menu: the Private link entries are already in $MENU" ;;
+  edited) say "Share menu: $MENU has Peridot's entries, but changed by you; not touched." ;;
   other) say "Keeping $MENU: it's a link or not a file, so not Peridot's; no menu entries added." ;;
   missing | absent)
     if (( ADD_MENU )); then say "Share menu"; menu_add_entries || true

@@ -49,6 +49,9 @@ for p in "${!MANIFEST_HASH[@]}"; do
     *) note "ignoring a record line for $p: not a path this script writes"; unset 'MANIFEST_HASH[$p]' ;;
   esac
 done
+for k in "${!MENU_LINE_HASH[@]}"; do
+  [[ $k == "$MENU"$'\t'* ]] || { note "ignoring a menu record line for ${k%%$'\t'*}: not the menu file this script edits"; unset 'MENU_LINE_HASH[$k]'; }
+done
 
 # ── The service ────────────────────────────────────────────────────────
 inspect_unit
@@ -102,7 +105,10 @@ case $MENU_STATE in
     else
       menu_remove_entries
     fi ;;
-  absent | missing) ;;
+  edited)
+    note "$MENU has Peridot's entries, but you changed them; they're yours now and stay. Edit them out yourself if you like."
+    forget_menu_lines ;;
+  absent | missing) forget_menu_lines ;;
   other) note "$MENU is a link or not a file; not Peridot's, leaving it." ;;
 esac
 
