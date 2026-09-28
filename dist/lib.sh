@@ -635,7 +635,38 @@ forget_menu_lines() {
 # file fetched from the same release: a release can be edited, a reviewed
 # commit can't. Each pin also names the source commit the build attestation
 # vouched for when the pin was made.
-RELEASE_CHECKSUMS="${PERIDOT_RELEASE_CHECKSUMS:-dist/release-checksums.tsv}"
+# install.sh --dev may point this at another table (PERIDOT_RELEASE_CHECKSUMS);
+# without --dev the variable is ignored and said so.
+RELEASE_CHECKSUMS="dist/release-checksums.tsv"
+# The minisign public key that signs dist/release-checksums.tsv, when one
+# exists (install.sh sets it). Empty means "no key yet": the signature file,
+# if any, isn't checked, and that is printed.
+PIN_SIGNING_PUBKEY="${PIN_SIGNING_PUBKEY:-}"
+# check_pin_signature: verifies $RELEASE_CHECKSUMS against
+# $RELEASE_CHECKSUMS.minisig with minisign before the table is trusted.
+# Dies on a bad signature. Says why when it can't check (no key in this
+# checkout, no signature file, minisign not installed) and lets the
+# checksum-pinning stand on its own, as before.
+check_pin_signature() {
+  local sig="$RELEASE_CHECKSUMS.minisig" out
+  if [[ ! $PIN_SIGNING_PUBKEY =~ ^RW[A-Za-z0-9+/]{54}$ ]]; then
+    [[ -e $sig ]] && note "$sig is present, but this checkout carries no signing key yet; the signature isn't checked."
+    return 0
+  fi
+  if [[ ! -f $sig || -L $sig ]]; then
+    note "$RELEASE_CHECKSUMS isn't signed ($sig is missing); relying on the pinned checksums alone."
+    return 0
+  fi
+  if ! command -v minisign >/dev/null; then
+    note "minisign isn't installed, so the signature on $RELEASE_CHECKSUMS isn't checked (pacman -S minisign)."
+    return 0
+  fi
+  if out="$(minisign -V -q -P "$PIN_SIGNING_PUBKEY" -m "$RELEASE_CHECKSUMS" -x "$sig" 2>&1)"; then
+    note "Signature on $RELEASE_CHECKSUMS verified (minisign)."
+    return 0
+  fi
+  die "The signature on $RELEASE_CHECKSUMS doesn't verify${out:+: $out}. Not installing a download it vouches for."
+}
 # pinned_release <asset>: prints "<sha256> <source commit> <size>" or nothing.
 pinned_release() {
   local h a c z

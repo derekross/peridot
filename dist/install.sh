@@ -15,13 +15,22 @@
 #   --menu                        consent, for a non-interactive run, to add
 #                                 the Private link entries to Omarchy's Share
 #                                 menu file (interactive runs ask)
+#   --dev                         for working on the installer itself: honour
+#                                 PERIDOT_RELEASE_CHECKSUMS=<file> as the
+#                                 table of pinned releases instead of
+#                                 dist/release-checksums.tsv. Without --dev
+#                                 that variable is ignored (and said so), so
+#                                 an environment can't point a normal install
+#                                 at other pins.
 #
 # Release binaries are built by GitHub Actions from the tag matching this
 # checkout's version. A download is accepted only if it matches the hash
 # pinned in this checkout (dist/release-checksums.tsv, added after each
 # release once its build attestation was verified), so the bytes are tied
 # to a reviewed commit, not to what the release page holds today. When the
-# GitHub CLI is signed in the attestation is checked again as well.
+# GitHub CLI is signed in the attestation is checked again as well. When
+# the pin table is signed (dist/release-checksums.tsv.minisig) and minisign
+# is installed, the signature is checked against the key below first.
 #
 # Run it again after `git pull` / `omarchy plugin update` to update.
 #
@@ -37,22 +46,40 @@ REPO="$PWD"
 source dist/lib.sh || { echo "dist/lib.sh is missing: run this from an Peridot checkout" >&2; exit 1; }
 VERSION="$(jq -r .version manifest.json)"
 GITHUB_REPO="derekross/peridot"
+# The minisign public key whose signature dist/release-checksums.tsv.minisig
+# must carry. TODO(Derek): generate a key (minisign -G, keep the secret key
+# off this machine's checkouts), paste the one-line public key here
+# ("RW" + 54 base64 characters, from the .pub file's second line), sign the
+# table after each dist/pin-release.sh run (minisign -Sm
+# dist/release-checksums.tsv) and commit the .minisig. Until then the
+# signature isn't checked, and install.sh says so when a .minisig exists.
+PIN_SIGNING_PUBKEY=""
 
 MODE=auto
 MENU_CONSENT=0
+DEV=0
 declare -A CONSENT=()
 for arg in "$@"; do
   case $arg in
     --build | --prebuilt | --no-build) MODE=$arg ;;
     --menu) MENU_CONSENT=1 ;;
+    --dev) DEV=1 ;;
     --replace-existing=/*) CONSENT["${arg#--replace-existing=}"]=1 ;;
     --replace-existing | --replace-existing=*)
       die "--replace-existing needs the absolute path of the one file to replace, e.g. --replace-existing=$BINDIR/peridotd" ;;
-    -h | --help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,41p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg (see --help)" >&2; exit 2 ;;
   esac
 done
 [[ $MODE == auto ]] && { command -v cargo >/dev/null && MODE=--build || MODE=--prebuilt; }
+if [[ -n ${PERIDOT_RELEASE_CHECKSUMS:-} ]]; then
+  if (( DEV )); then
+    RELEASE_CHECKSUMS="$PERIDOT_RELEASE_CHECKSUMS"
+    say "--dev: pinned releases are read from $RELEASE_CHECKSUMS, not dist/release-checksums.tsv"
+  else
+    say "Ignoring PERIDOT_RELEASE_CHECKSUMS (only honoured with --dev); using dist/release-checksums.tsv"
+  fi
+fi
 
 # Installed with `omarchy plugin add`, this checkout *is* the plugin. Build
 # outside it: the shell reloads plugins whenever files change in there.
@@ -72,6 +99,7 @@ download_release() {
   base="https://github.com/$GITHUB_REPO/releases/download/v$VERSION"
   dir="$CACHEDIR/release"
   local pin size
+  check_pin_signature
   pin="$(pinned_release "$name.tar.gz")"
   [[ -n $pin ]] \
     || die "This checkout has no pinned checksum for $name.tar.gz (a release is pinned in dist/release-checksums.tsv after it is published). Build from source with --build, or use a newer checkout."

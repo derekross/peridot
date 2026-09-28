@@ -41,7 +41,7 @@ ProtectHostname=yes
 ProtectKernelLogs=yes
 # Your key lives in this process: never write core dumps.
 LimitCORE=0
-UMask=0022
+UMask=0077
 
 [Install]
 WantedBy=graphical-session.target

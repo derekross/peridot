@@ -1,0 +1,5 @@
+#!/bin/sh
+# Stub: logs the call; verifies or not as FAKE_MINISIGN_RC says.
+echo "minisign $*" >>"${FAKE_LOG:-/dev/null}"
+[ "${FAKE_MINISIGN_RC:-0}" = 0 ] || echo "Signature verification failed" >&2
+exit "${FAKE_MINISIGN_RC:-0}"
