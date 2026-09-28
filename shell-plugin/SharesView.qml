@@ -12,6 +12,9 @@ Column {
   property color urgent: Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
 
+  // install.sh puts the command in ~/.local/bin; call it by that path, not
+  // by whatever PATH resolves.
+  readonly property string peridotBin: Quickshell.env("HOME") + "/.local/bin/peridot"
   readonly property var shares: svc ? (svc.status.shares || []) : []
   readonly property int days: svc && svc.status.share_expire_days ? svc.status.share_expire_days : 7
   property string confirmRemove: ""
@@ -67,21 +70,21 @@ Column {
       iconText: ""
       bordered: true
       foreground: root.foreground
-      onClicked: Quickshell.execDetached(["peridot", "share", "--pick", "--notify"])
+      onClicked: Quickshell.execDetached([root.peridotBin, "share", "--pick", "--notify"])
     }
     Button {
       text: "Clipboard"
       iconText: ""
       bordered: true
       foreground: root.foreground
-      onClicked: Quickshell.execDetached(["peridot", "share", "--clipboard", "--notify"])
+      onClicked: Quickshell.execDetached([root.peridotBin, "share", "--clipboard", "--notify"])
     }
     Button {
       text: "Last screenshot"
       iconText: "󰹑"
       bordered: true
       foreground: root.foreground
-      onClicked: Quickshell.execDetached(["peridot", "share", "--screenshot", "--notify"])
+      onClicked: Quickshell.execDetached([root.peridotBin, "share", "--screenshot", "--notify"])
     }
   }
   Text {

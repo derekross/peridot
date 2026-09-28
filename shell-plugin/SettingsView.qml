@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "util.js" as U
@@ -33,10 +34,30 @@ Column {
     svc.call("identity.card", null, function(err, r) { if (!err) root.card = r })
   }
 
+  // Secrets go to the clipboard over stdin, never argv (argv is readable
+  // by every process of this user).
+  Process {
+    id: copier
+    property string pending: ""
+    command: ["/usr/bin/wl-copy"]
+    stdinEnabled: true
+    function copyText(text) {
+      running = false
+      pending = text
+      stdinEnabled = true
+      running = true
+    }
+    onStarted: {
+      write(pending)
+      pending = ""
+      stdinEnabled = false   // closes stdin, so wl-copy sees the end
+    }
+  }
+
   function openProfile() {
     if (!card) return
     var link = "https://njump.me/" + card.nprofile
-    Quickshell.execDetached(["xdg-open", link])
+    Quickshell.execDetached(["/usr/bin/xdg-open", link])
     svc.message("Opening your profile in the browser", false)
   }
 
@@ -45,7 +66,7 @@ Column {
       if (err) { root.svc.message(err, true); return }
       root.move = r
       root.moveState = "waiting"
-      Quickshell.execDetached(["wl-copy", "--", r.code])
+      copier.copyText(r.code)
       root.svc.message("The code is on your clipboard", false)
       root.checkMove()
     })
@@ -69,7 +90,7 @@ Column {
     svc.call("identity.move.finish", null, function(err, r) {
       root.finishing = false
       if (err) { root.moveState = "found"; root.svc.message(err, true); return }
-      Quickshell.execDetached(["wl-copy", "--clear"])
+      Quickshell.execDetached(["/usr/bin/wl-copy", "--clear"])
       root.move = null
       root.moveState = ""
       root.svc.message("Opal now holds your identity", false)
@@ -80,7 +101,7 @@ Column {
   function cancelMove() {
     root.move = null
     root.moveState = ""
-    Quickshell.execDetached(["wl-copy", "--clear"])
+    Quickshell.execDetached(["/usr/bin/wl-copy", "--clear"])
   }
 
   Timer {
@@ -483,7 +504,7 @@ Column {
         text: "Copy the code again"
         iconText: "󰆏"
         foreground: root.foreground
-        onClicked: { Quickshell.execDetached(["wl-copy", "--", root.move.code]); root.svc.message("Copied", false) }
+        onClicked: { copier.copyText(root.move.code); root.svc.message("Copied", false) }
       }
       Button {
         visible: !root.finishing
