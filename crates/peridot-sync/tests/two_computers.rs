@@ -30,6 +30,7 @@ impl Computer {
         let db = Db::open_in_memory().unwrap();
         let engine = SyncEngine::new(SyncParams {
             identity: identity.clone(),
+            previous: None,
             signer: Arc::new(LocalSigner(identity.keys.clone().unwrap())),
             store: SyncStore::new(db.clone()).unwrap(),
             outbox: Outbox::new(db).unwrap(),
@@ -216,7 +217,8 @@ async fn an_event_from_the_far_future_is_refused() {
     let url = relay.url().await;
     let id = Identity::generate();
     let desk = Computer::new(&id, &url, "Desk").await;
-    let keys = id.keys.clone().unwrap();
+    // Items are signed by the epoch's key, not the identity.
+    let keys = desk.engine.sync_signing_keys().unwrap();
     let engine_keys = id.secret.keys();
     let since_before = desk.engine.store.since();
 
@@ -380,6 +382,7 @@ async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
     let db = Db::open_in_memory().unwrap();
     let laptop = SyncEngine::new(SyncParams {
         identity: id.clone(),
+        previous: None,
         signer: Arc::new(LocalSigner(id.keys.clone().unwrap())),
         store: SyncStore::new(db.clone()).unwrap(),
         outbox: Outbox::new(db).unwrap(),
@@ -405,12 +408,12 @@ async fn a_computer_that_cant_see_the_servers_publishes_nothing() {
 }
 
 /// Everything of ours on one relay: d → created_at.
-async fn on_relay(relay: &RelayUrl, id: &Identity) -> std::collections::BTreeMap<String, u64> {
+async fn on_relay(relay: &RelayUrl, author: PublicKey) -> std::collections::BTreeMap<String, u64> {
     let client = Client::default();
     client.add_relay(relay).await.unwrap();
     client.connect().and_wait(Duration::from_secs(3)).await;
     let filter = Filter::new()
-        .author(id.pubkey())
+        .author(author)
         .kind(Kind::Custom(peridot_sync::DATA_KIND));
     let events = client
         .fetch_events(vec![(relay.clone(), vec![filter])])
@@ -425,11 +428,11 @@ async fn on_relay(relay: &RelayUrl, id: &Identity) -> std::collections::BTreeMap
     out
 }
 
-async fn deletions_on(relay: &RelayUrl, id: &Identity) -> Vec<Event> {
+async fn deletions_on(relay: &RelayUrl, author: PublicKey) -> Vec<Event> {
     let client = Client::default();
     client.add_relay(relay).await.unwrap();
     client.connect().and_wait(Duration::from_secs(3)).await;
-    let filter = Filter::new().author(id.pubkey()).kind(Kind::Custom(5));
+    let filter = Filter::new().author(author).kind(Kind::Custom(5));
     let events = client
         .fetch_events(vec![(relay.clone(), vec![filter])])
         .timeout(Duration::from_secs(5))
@@ -458,11 +461,14 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
     desk.engine.announce().await.unwrap();
     desk.engine.publish_changes().await.unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let before = on_relay(&u1, &id).await;
-    // 2 files, their chunks, state entries, the device and the root.
-    assert!(before.len() >= 7, "{before:?}");
-    let chunks = before.len() - 6;
-    assert!(on_relay(&u2, &id).await.is_empty());
+    let sync_key = desk.engine.sync_pubkey();
+    let before = on_relay(&u1, sync_key).await;
+    // 2 files, their chunks, state entries and the device (the root sits
+    // under the identity's own key).
+    assert!(before.len() >= 6, "{before:?}");
+    let chunks = before.len() - 5;
+    assert_eq!(on_relay(&u1, id.pubkey()).await.len(), 1, "the root");
+    assert!(on_relay(&u2, sync_key).await.is_empty());
 
     // The laptop uses both servers: its audit notices the second has
     // nothing and sends everything there.
@@ -478,7 +484,7 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
     assert_eq!(report.refreshed, 0);
     assert_eq!(report.stale_chunks, 0);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let second = on_relay(&u2, &id).await;
+    let second = on_relay(&u2, sync_key).await;
     assert!(
         second.len() > before.len(),
         "both device entries and everything else: {second:?}"
@@ -496,7 +502,7 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
     assert_eq!((report.resent, report.refreshed), (0, 0), "{report:?}");
 
     // A month later, everything is published again with fresh dates.
-    let old = on_relay(&u1, &id).await;
+    let old = on_relay(&u1, sync_key).await;
     let report = laptop
         .engine
         .audit(now + peridot_sync::sync::REFRESH_AFTER + 60)
@@ -504,10 +510,15 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
         .unwrap();
     assert!(report.refreshed >= 6, "{report:?}");
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let fresh = on_relay(&u1, &id).await;
-    for (d, at) in &old {
-        assert!(fresh[d] > *at || d.len() == 32, "{d} wasn't refreshed");
-    }
+    let fresh = on_relay(&u1, sync_key).await;
+    // Files, chunks and state get fresh dates; the two device entries are
+    // renewed by their own computers' daily announce instead.
+    let bumped = old.iter().filter(|(d, at)| fresh[*d] > **at).count();
+    assert!(
+        bumped >= old.len() - 2,
+        "{bumped} of {} refreshed",
+        old.len()
+    );
     assert_eq!(
         laptop.status(BINDINGS).await,
         Some(FileStatus::Incoming),
@@ -536,7 +547,7 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
         .unwrap();
     assert_eq!(removed, chunks);
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let dels = deletions_on(&u1, &id).await;
+    let dels = deletions_on(&u1, sync_key).await;
     assert_eq!(dels.len(), 1);
     let coords: Vec<String> = dels[0]
         .tags
@@ -548,7 +559,7 @@ async fn the_audit_fills_gaps_refreshes_old_items_and_finds_stale_chunks() {
     assert!(
         coords
             .iter()
-            .all(|c| c.starts_with(&format!("30078:{}:", id.pubkey().to_hex())))
+            .all(|c| c.starts_with(&format!("30078:{}:", sync_key.to_hex())))
     );
     assert!(dels[0].tags.iter().any(|t| t.as_slice() == ["k", "30078"]));
     let after = desk.engine.last_audit().await.unwrap();

@@ -102,6 +102,7 @@ pub const METHODS: &[(&str, Class)] = &[
     ("items.set", Class::Sensitive),
     ("relays.set", Class::Sensitive),
     ("device.remove", Class::Sensitive),
+    ("sync.rotate", Class::Sensitive),
     ("servers.audit", Class::Sensitive),
     ("pair.new", Class::Sensitive),
     ("pair.join", Class::Sensitive),

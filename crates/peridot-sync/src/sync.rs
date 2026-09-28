@@ -16,16 +16,17 @@ use tokio::sync::RwLock;
 
 use crate::DATA_KIND;
 use crate::apply::Home;
-use crate::crypto::{SyncKeys, sha256_hex};
+use crate::crypto::{SyncKeys, SyncSecret, sha256_hex};
 use crate::envelope::{self, DeviceInfo, Item, Sealed, Source, StateEntry};
 use crate::identity::Identity;
 use crate::manifest::{Manifest, Tier};
+use crate::rotation::{self, Rotation};
 use crate::scan::{self, Skipped};
 use crate::store::{FileStatus, SyncStore, decide};
 
-/// How far back to look again when catching up (clock differences between
-/// computers and relays).
-const CATCH_UP_MARGIN: u64 = 10 * 60;
+/// How far back to look again when catching up: items are dated to the
+/// hour (plus clock differences between computers and relays).
+pub const CATCH_UP_MARGIN: u64 = 2 * 3600 + 10 * 60;
 /// How long to wait for relays when fetching.
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 /// Backups kept for undo.
@@ -46,6 +47,9 @@ pub const MAX_CLOCK_AHEAD: u64 = 600;
 
 pub struct SyncParams {
     pub identity: Identity,
+    /// The secret of the epoch before the current one, while its items
+    /// are still being cleaned up (a rotation's window).
+    pub previous: Option<SyncSecret>,
     pub signer: Arc<dyn crate::signer::IdentitySigner>,
     pub store: SyncStore,
     pub outbox: Outbox,
@@ -62,6 +66,12 @@ pub struct SyncParams {
 pub struct SyncEngine {
     identity: Identity,
     keys: SyncKeys,
+    /// The previous epoch's keys during a rotation's window: its items are
+    /// still read (and re-sealed under the current keys) until cleanup.
+    previous: Option<(SyncSecret, SyncKeys)>,
+    /// A rotation another computer announced, waiting for the daemon to
+    /// switch this engine over (or the news that we were removed).
+    pending_rotation: std::sync::Mutex<Option<Rotation>>,
     device: String,
     device_name: String,
     version: String,
@@ -181,8 +191,14 @@ impl SyncEngine {
     pub fn new(p: SyncParams) -> anyhow::Result<Self> {
         let keys = p.identity.secret.keys();
         let device = p.store.device_id()?;
+        let previous = p.previous.map(|s| {
+            let k = s.keys();
+            (s, k)
+        });
         Ok(Self {
             keys,
+            previous,
+            pending_rotation: std::sync::Mutex::new(None),
             device,
             device_name: p.device_name,
             version: p.version,
@@ -279,9 +295,13 @@ impl SyncEngine {
         let expected_ds: BTreeSet<&str> = expected.iter().map(|(s, ..)| s.d.as_str()).collect();
         let mut reachable = 0;
         for relay in &relays {
+            let root_filter = Filter::new()
+                .author(self.pubkey())
+                .kind(Kind::Custom(DATA_KIND))
+                .identifier(root_d.clone());
             let fetched = self
                 .client
-                .fetch_events(vec![(relay.clone(), vec![self.filter(0)])])
+                .fetch_events(vec![(relay.clone(), vec![self.filter(0), root_filter])])
                 .timeout(FETCH_TIMEOUT)
                 .await;
             let mut health = RelayHealth {
@@ -299,7 +319,9 @@ impl SyncEngine {
                 let Some(d) = ev.tags.identifier() else {
                     continue;
                 };
-                if ev.pubkey != self.pubkey() || ev.verify().is_err() {
+                // Only this epoch's items (the root is the identity's).
+                let root = d == root_d && ev.pubkey == self.pubkey();
+                if (ev.pubkey != self.sync_pubkey() && !root) || ev.verify().is_err() {
                     continue;
                 }
                 let at = ev.created_at.as_secs();
@@ -386,7 +408,7 @@ impl SyncEngine {
                 report.stale_chunks += 1;
                 report
                     .stale
-                    .push(format!("{DATA_KIND}:{}:{d}", self.pubkey().to_hex()));
+                    .push(format!("{DATA_KIND}:{}:{d}", self.sync_pubkey().to_hex()));
             }
         }
         let _ = self
@@ -412,8 +434,13 @@ impl SyncEngine {
             for coord in batch {
                 b = b.tag(Tag::custom("a", [coord.as_str()]));
             }
-            let unsigned = b.finalize_unsigned(self.pubkey());
-            let ev = sign_within(signer, unsigned, signer.sign_timeout()).await?;
+            let ev = match self.keys.signer() {
+                Some(k) => b.finalize(k)?,
+                None => {
+                    let unsigned = b.finalize_unsigned(self.pubkey());
+                    sign_within(signer, unsigned, signer.sign_timeout()).await?
+                }
+            };
             self.outbox.push(&ev)?;
             removed += batch.len();
         }
@@ -469,12 +496,69 @@ impl SyncEngine {
             .await;
     }
 
+    /// The key this epoch's items are signed by: the sync signing key, or
+    /// the identity for the legacy epoch.
+    pub fn sync_pubkey(&self) -> PublicKey {
+        self.keys
+            .signer()
+            .map(|k| k.public_key())
+            .unwrap_or_else(|| self.identity.pubkey())
+    }
+
+    /// The previous epoch's author, while its window is open.
+    fn previous_pubkey(&self) -> Option<PublicKey> {
+        self.previous.as_ref().map(|(_, k)| {
+            k.signer()
+                .map(|s| s.public_key())
+                .unwrap_or_else(|| self.identity.pubkey())
+        })
+    }
+
+    /// Where the rotation to the next epoch would be announced.
+    fn rekey_pubkey(&self) -> Option<PublicKey> {
+        (!self.identity.secret.is_legacy()).then(|| self.identity.secret.rekey_keys().public_key())
+    }
+
+    /// Everyone we listen to: this epoch, the previous one during its
+    /// window, and the next epoch's rekey address.
+    fn authors(&self) -> Vec<PublicKey> {
+        let mut a = vec![self.sync_pubkey()];
+        if let Some(p) = self.previous_pubkey()
+            && !a.contains(&p)
+        {
+            a.push(p);
+        }
+        if let Some(r) = self.rekey_pubkey() {
+            a.push(r);
+        }
+        a
+    }
+
     /// The filter for everything of ours from `since`.
     pub fn filter(&self, since: u64) -> Filter {
         Filter::new()
-            .author(self.pubkey())
+            .authors(self.authors())
             .kind(Kind::Custom(DATA_KIND))
             .since(Timestamp::from(since))
+    }
+
+    /// The epoch this computer is on.
+    pub fn epoch(&self) -> u64 {
+        self.keys.epoch()
+    }
+
+    /// This epoch's signing key (tests build events with it).
+    pub fn sync_signing_keys(&self) -> Option<Keys> {
+        self.keys.signer().cloned()
+    }
+
+    /// A rotation that arrived from another computer, once; the daemon
+    /// switches over (or tells you this computer was removed).
+    pub fn take_pending_rotation(&self) -> Option<Rotation> {
+        self.pending_rotation
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
     }
 
     /// Fetch what changed since we last looked and take it in. Returns how
@@ -537,8 +621,7 @@ impl SyncEngine {
     /// Take in one event from a relay. Returns whether it told us something
     /// new.
     pub fn ingest(&self, ev: &Event) -> bool {
-        if ev.pubkey != self.pubkey() || ev.kind != Kind::Custom(DATA_KIND) || ev.verify().is_err()
-        {
+        if ev.kind != Kind::Custom(DATA_KIND) || ev.verify().is_err() {
             return false;
         }
         let Some(d) = ev.tags.identifier() else {
@@ -549,7 +632,29 @@ impl SyncEngine {
             tracing::debug!("ignoring an event dated {}s in the future", at - now());
             return false;
         }
-        let Some(item) = envelope::open(&self.keys, &d, &ev.content) else {
+        // A rotation announced under the next epoch's address.
+        if Some(ev.pubkey) == self.rekey_pubkey() && ev.pubkey != self.sync_pubkey() {
+            return self.take_rotation(ev);
+        }
+        // From the previous epoch, during its window: read it, and say it
+        // again under the current keys so it survives the cleanup.
+        let item = if ev.pubkey == self.sync_pubkey() {
+            envelope::open(&self.keys, &d, &ev.content)
+        } else if Some(ev.pubkey) == self.previous_pubkey() {
+            let Some((_, old_keys)) = &self.previous else {
+                return false;
+            };
+            let opened = envelope::open(old_keys, &d, &ev.content);
+            if let Some(item) = &opened
+                && let Ok(sealed) = envelope::seal(&self.keys, item)
+            {
+                let _ = self.queue_local(&sealed, at);
+            }
+            opened
+        } else {
+            None
+        };
+        let Some(item) = item else {
             return false;
         };
         let _ = self.store.set_since(at);
@@ -713,6 +818,7 @@ impl SyncEngine {
             version: self.version.clone(),
             last_seen: now(),
             removed: false,
+            pubkey: Some(self.identity.device.public_key().to_hex()),
         };
         self.queue(&[envelope::seal(&self.keys, &Item::Device(device))?], 0)
             .await?;
@@ -743,6 +849,25 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// The newest root event on the servers, if any.
+    pub async fn fetch_root(&self) -> anyhow::Result<Option<Event>> {
+        let relays = self.relays.read().await.clone();
+        let filter = Filter::new()
+            .author(self.pubkey())
+            .kind(Kind::Custom(DATA_KIND))
+            .identifier(Identity::root_name(&self.pubkey()));
+        let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
+            .iter()
+            .map(|r| (r.clone(), vec![filter.clone()]))
+            .collect();
+        let events = self
+            .client
+            .fetch_events(targets)
+            .timeout(FETCH_TIMEOUT)
+            .await?;
+        Ok(events.iter().max_by_key(|e| e.created_at).cloned())
+    }
+
     /// Publish the root event (the sync secret, encrypted to our own key)
     /// so a recovery kit can restore everything.
     pub async fn publish_root(&self) -> anyhow::Result<()> {
@@ -767,6 +892,177 @@ impl SyncEngine {
         self.queue(&[sealed], 0).await?;
         self.flush().await;
         Ok(())
+    }
+
+    /// Everything this computer knows, said again under the current keys.
+    /// After a rotation, so the new epoch has it all.
+    pub async fn republish_everything(&self) -> anyhow::Result<usize> {
+        let items = self.expected_items()?;
+        let n = items.len();
+        for (sealed, _, at) in items {
+            let after = if at == u64::MAX { 0 } else { at };
+            self.queue(std::slice::from_ref(&sealed), after).await?;
+        }
+        self.flush().await;
+        Ok(n)
+    }
+
+    /// Start the next epoch: a new secret, handed to every current device
+    /// except `remove`, announced under the address derived from the
+    /// current secret. Returns the new secret; the daemon then saves it,
+    /// restarts this engine with it, publishes the root again and calls
+    /// [`Self::republish_everything`]. Nothing here changes the current
+    /// keys, so a crash before the switch leaves everything as it was.
+    pub async fn rotate(&self, remove: &[String]) -> anyhow::Result<SyncSecret> {
+        // Everything must be here to be said again under the new keys.
+        let missing = self.missing_chunks()?;
+        anyhow::ensure!(
+            missing == 0,
+            "{missing} piece(s) of your settings haven't arrived yet; try again in a moment"
+        );
+        let devices = self.store.devices()?;
+        for id in remove {
+            anyhow::ensure!(*id != self.device, "this computer can't remove itself");
+            anyhow::ensure!(devices.iter().any(|d| &d.id == id), "no such computer");
+        }
+        // Mark the removed ones, under the current keys; the directory is
+        // republished under the new epoch with the flags.
+        for id in remove {
+            if let Some(mut info) = devices.iter().find(|d| &d.id == id).cloned() {
+                info.removed = true;
+                info.last_seen = now();
+                let _ = self.store.put_device(&info, now());
+            }
+        }
+        let recipients: Vec<PublicKey> = self
+            .store
+            .devices()?
+            .iter()
+            .filter(|d| !d.removed && !remove.contains(&d.id))
+            .filter_map(|d| {
+                d.pubkey
+                    .as_deref()
+                    .and_then(|p| PublicKey::from_hex(p).ok())
+            })
+            .filter(|p| *p != self.identity.device.public_key())
+            .collect();
+        let next = self.identity.secret.next();
+        let ev = rotation::announce(
+            &self.identity.secret,
+            &next,
+            &self.identity.device,
+            &recipients,
+        )?;
+        self.outbox.push(&ev)?;
+        self.flush().await;
+        Ok(next)
+    }
+
+    /// Chunks current entries refer to that never arrived.
+    fn missing_chunks(&self) -> anyhow::Result<usize> {
+        let mut n = 0;
+        for path in self.store.remote_paths()? {
+            if let Some(r) = self.store.remote(&path)?
+                && !r.entry.deleted
+            {
+                n += r
+                    .entry
+                    .chunks
+                    .iter()
+                    .filter(|c| self.store.chunk(c).is_none())
+                    .count();
+            }
+        }
+        Ok(n)
+    }
+
+    /// A rotation event under our rekey address: open it, find our wrap.
+    fn take_rotation(&self, ev: &Event) -> bool {
+        let outcome = rotation::adopt(ev, &self.identity.secret, &self.identity.device);
+        match outcome {
+            Ok(r) => {
+                let mut slot = self
+                    .pending_rotation
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                // Two rotations at once: the lower secret wins, so every
+                // computer picks the same one.
+                let replace = match (&*slot, &r) {
+                    (None, _) => true,
+                    (Some(Rotation::Removed { .. }), Rotation::Adopt { .. }) => true,
+                    (
+                        Some(Rotation::Adopt { secret: have, .. }),
+                        Rotation::Adopt { secret, .. },
+                    ) => secret.bytes() < have.bytes(),
+                    _ => false,
+                };
+                if replace {
+                    *slot = Some(r);
+                }
+                true
+            }
+            Err(e) => {
+                tracing::debug!("ignoring a rotation event: {e}");
+                false
+            }
+        }
+    }
+
+    /// The previous epoch's items on the servers, as coordinates to delete
+    /// once its window has closed.
+    pub async fn previous_coordinates(&self) -> anyhow::Result<Vec<String>> {
+        let Some(prev) = self.previous_pubkey() else {
+            return Ok(Vec::new());
+        };
+        let relays = self.relays.read().await.clone();
+        let filter = Filter::new().author(prev).kind(Kind::Custom(DATA_KIND));
+        let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
+            .iter()
+            .map(|r| (r.clone(), vec![filter.clone()]))
+            .collect();
+        let events = self
+            .client
+            .fetch_events(targets)
+            .timeout(FETCH_TIMEOUT)
+            .await?;
+        let mut coords = BTreeSet::new();
+        for ev in events.iter() {
+            if let Some(d) = ev.tags.identifier() {
+                coords.insert(format!("{DATA_KIND}:{}:{d}", prev.to_hex()));
+            }
+        }
+        Ok(coords.into_iter().collect())
+    }
+
+    /// Delete the previous epoch's items (signed by its own key when it
+    /// has one; the legacy epoch's need the identity's signer).
+    pub async fn delete_previous(
+        &self,
+        signer: &dyn crate::signer::IdentitySigner,
+        coordinates: &[String],
+    ) -> anyhow::Result<usize> {
+        let Some((_, old_keys)) = &self.previous else {
+            return Ok(0);
+        };
+        let mut removed = 0;
+        for batch in coordinates.chunks(DELETE_BATCH) {
+            let mut b = EventBuilder::new(Kind::Custom(5), "")
+                .tag(Tag::custom("k", [DATA_KIND.to_string()]));
+            for coord in batch {
+                b = b.tag(Tag::custom("a", [coord.as_str()]));
+            }
+            let ev = match old_keys.signer() {
+                Some(k) => b.finalize(k)?,
+                None => {
+                    let unsigned = b.finalize_unsigned(self.pubkey());
+                    sign_within(signer, unsigned, signer.sign_timeout()).await?
+                }
+            };
+            self.outbox.push(&ev)?;
+            removed += batch.len();
+        }
+        self.flush().await;
+        Ok(removed)
     }
 
     /// Apply incoming changes to `paths` (all incoming ones if empty).
@@ -942,8 +1238,15 @@ impl SyncEngine {
     }
 
     /// Sign sealed items (dated after `after`), take them in ourselves and
-    /// queue them.
+    /// queue them. This epoch's signing key signs here, without asking
+    /// anyone; only the legacy epoch goes through the identity's signer.
     async fn queue(&self, sealed: &[Sealed], after: u64) -> anyhow::Result<()> {
+        if self.keys.signer().is_some() {
+            for s in sealed {
+                self.queue_local(s, after)?;
+            }
+            return Ok(());
+        }
         for s in sealed {
             let unsigned = EventBuilder::new(Kind::Custom(DATA_KIND), s.content.clone())
                 .tag(Tag::identifier(s.d.clone()))
@@ -957,11 +1260,32 @@ impl SyncEngine {
         Ok(())
     }
 
+    /// The same, signed by this epoch's key (no waiting, no prompts).
+    fn queue_local(&self, s: &Sealed, after: u64) -> anyhow::Result<()> {
+        let signer = self
+            .keys
+            .signer()
+            .ok_or_else(|| anyhow::anyhow!("the legacy epoch has no signing key"))?;
+        let ev = EventBuilder::new(Kind::Custom(DATA_KIND), s.content.clone())
+            .tag(Tag::identifier(s.d.clone()))
+            .custom_created_at(Timestamp::from(self.next_created_at(after)))
+            .finalize(signer)?;
+        self.ingest(&ev);
+        self.outbox.push(&ev)?;
+        Ok(())
+    }
+
     /// Strictly increasing timestamps, and always after the version being
     /// replaced (which another computer may have dated ahead of our clock):
-    /// relays keep the newest per `d` tag.
+    /// relays keep the newest per `d` tag. Dated to the hour (legacy
+    /// items aside), so relays don't learn when exactly you work.
     fn next_created_at(&self, after: u64) -> u64 {
-        let now = now().max(after + 1);
+        let base = if self.keys.is_legacy() {
+            now()
+        } else {
+            now() / 3600 * 3600
+        };
+        let now = base.max(after + 1);
         let mut prev = self.last_created.load(Ordering::SeqCst);
         loop {
             let next = now.max(prev + 1);

@@ -25,6 +25,10 @@ use tokio::task::JoinHandle;
 use crate::config::Config;
 use crate::pair::PairSession;
 
+/// How long the previous epoch's items are still read after a rotation
+/// (a computer that was offline catches up), before they're deleted.
+const WINDOW: u64 = 7 * 86_400;
+
 pub struct Options {
     pub config: Config,
     pub config_path: PathBuf,
@@ -235,9 +239,11 @@ impl App {
         let client = Client::builder()
             .authenticator(SignerAuth(signer.clone()))
             .build();
+        let previous = Identity::load_previous(&self.secrets).await?;
         let engine = Arc::new(SyncEngine::new(SyncParams {
             signer,
             identity,
+            previous,
             store,
             outbox: Outbox::new(self.db.clone())?,
             home: Home::open(&self.home)?,
@@ -314,6 +320,94 @@ impl App {
             .set_kv("peridot.identity_name", label.as_deref().unwrap_or(""))?;
         self.emit_state().await;
         Ok(())
+    }
+
+    /// Move every remaining computer to the next epoch, leaving `remove`
+    /// behind: mint the secret and announce it (engine), save it here with
+    /// the old one kept for the cleanup window, restart with it, publish
+    /// the root again and say everything again under the new keys (the
+    /// runner does the last two, and retries them).
+    pub async fn rotate(self: &Arc<Self>, remove: &[String]) -> anyhow::Result<u64> {
+        let engine = self.engine().await?;
+        let next = engine.rotate(remove).await?;
+        let epoch = next.epoch();
+        let old = engine.identity().secret.clone();
+        let identity = engine.identity().clone().with_secret(next);
+        // Order: the new secret is saved before anything switches, so a
+        // crash here restarts into the new epoch and finishes the rest.
+        Identity::save_previous(&self.secrets, &old).await?;
+        identity.save(&self.secrets).await?;
+        self.db.set_kv(
+            "peridot.window_until",
+            &(Timestamp::now().as_secs() + WINDOW).to_string(),
+        )?;
+        self.db.set_kv("peridot.republish_pending", "1")?;
+        self.start_engine(identity, true).await?;
+        Ok(epoch)
+    }
+
+    /// Another computer rotated and handed us the new secret.
+    pub async fn adopt_epoch(
+        self: &Arc<Self>,
+        secret: peridot_sync::crypto::SyncSecret,
+    ) -> anyhow::Result<()> {
+        let engine = self.engine().await?;
+        if secret.epoch() <= engine.epoch() {
+            return Ok(());
+        }
+        let old = engine.identity().secret.clone();
+        let identity = engine.identity().clone().with_secret(secret);
+        Identity::save_previous(&self.secrets, &old).await?;
+        identity.save(&self.secrets).await?;
+        self.db.set_kv(
+            "peridot.window_until",
+            &(Timestamp::now().as_secs() + WINDOW).to_string(),
+        )?;
+        self.start_engine(identity, false).await?;
+        tracing::info!("moved to epoch {}", self.engine().await?.epoch());
+        Ok(())
+    }
+
+    /// Another computer removed this one: stop, and say so. The settings
+    /// here stay; syncing needs a new pairing.
+    pub async fn removed_elsewhere(self: &Arc<Self>) {
+        self.stop_engine().await;
+        self.set_error(Some(
+            "This computer was removed from your Peridot on another computer. Pair it again to keep syncing."
+                .into(),
+        ))
+        .await;
+        self.emit_state().await;
+    }
+
+    /// The previous epoch's items, once its window has closed: delete
+    /// them from the servers and forget that secret. `interactive` lets
+    /// a legacy epoch's deletions (signed by the identity) prompt in Opal.
+    pub async fn cleanup_previous(self: &Arc<Self>, interactive: bool) -> anyhow::Result<usize> {
+        let engine = self.engine().await?;
+        if Identity::load_previous(&self.secrets).await?.is_none() {
+            return Ok(0);
+        }
+        let until: u64 = self
+            .db
+            .get_kv("peridot.window_until")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if Timestamp::now().as_secs() < until {
+            return Ok(0);
+        }
+        let coords = engine.previous_coordinates().await?;
+        let signer = if interactive {
+            self.sharer().await?.signer.clone()
+        } else {
+            engine.signer()
+        };
+        let n = engine.delete_previous(signer.as_ref(), &coords).await?;
+        Identity::clear_previous(&self.secrets).await?;
+        let _ = self.db.set_kv("peridot.window_until", "0");
+        let identity = engine.identity().clone();
+        self.start_engine(identity, false).await?;
+        Ok(n)
     }
 
     pub async fn leave(self: &Arc<Self>) -> anyhow::Result<()> {
@@ -420,6 +514,9 @@ impl App {
             "pubkey": identity.pubkey().to_hex(),
             "npub": identity.pubkey().to_bech32().ok(),
             "name": self.db.get_kv("peridot.identity_name").ok().flatten(),
+            "epoch": engine.epoch(),
+            "window_until": self.db.get_kv("peridot.window_until").ok().flatten()
+                .and_then(|s| s.parse::<u64>().ok()).filter(|t| *t > 0),
             // Opal is installed (its socket exists), so a key held here
             // could move into it.
             "opal_installed": self.opal_socket.exists(),

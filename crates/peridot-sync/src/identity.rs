@@ -20,6 +20,10 @@ use crate::crypto::SyncSecret;
 use crate::signer::IdentitySigner;
 
 const ITEM_ID: &str = "main";
+/// This computer's permanent device key, under the same item kind.
+const DEVICE_ID: &str = "device";
+/// The previous epoch's sync secret, during a rotation's window.
+const PREVIOUS_ID: &str = "prev";
 const OPAL_PREFIX: &str = "opal:";
 
 #[derive(Clone)]
@@ -27,7 +31,11 @@ pub struct Identity {
     pub pubkey: PublicKey,
     /// The key itself when this computer holds it; None when Opal does.
     pub keys: Option<Keys>,
+    /// The sync secret of the current epoch.
     pub secret: SyncSecret,
+    /// This computer's own key: the sync secret is handed to it, and it
+    /// signs nothing public. Never leaves this computer.
+    pub device: Keys,
 }
 
 impl std::fmt::Debug for Identity {
@@ -51,6 +59,7 @@ impl Identity {
             pubkey: keys.public_key(),
             keys: Some(keys),
             secret: SyncSecret::generate(),
+            device: Keys::generate(),
         }
     }
 
@@ -60,7 +69,19 @@ impl Identity {
             pubkey,
             keys: None,
             secret: SyncSecret::generate(),
+            device: Keys::generate(),
         }
+    }
+
+    /// The same identity with the sync secret of a newer epoch.
+    pub fn with_secret(mut self, secret: SyncSecret) -> Self {
+        self.secret = secret;
+        self
+    }
+
+    /// The epoch this computer is on (0 = the first protocol version).
+    pub fn epoch(&self) -> u64 {
+        self.secret.epoch()
     }
 
     pub fn pubkey(&self) -> PublicKey {
@@ -74,7 +95,50 @@ impl Identity {
             pubkey: self.pubkey,
             keys: None,
             secret: self.secret,
+            device: self.device,
         }
+    }
+
+    /// The previous epoch's secret, kept while its items are cleaned up.
+    pub async fn load_previous(store: &SecretStore) -> anyhow::Result<Option<SyncSecret>> {
+        match store.get(ItemKind::SyncSecret, PREVIOUS_ID).await? {
+            Some(hex) => Ok(Some(SyncSecret::from_hex(&hex)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn save_previous(store: &SecretStore, secret: &SyncSecret) -> anyhow::Result<()> {
+        store
+            .put(
+                ItemKind::SyncSecret,
+                PREVIOUS_ID,
+                "Peridot sync key (previous epoch)",
+                &secret.to_hex(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn clear_previous(store: &SecretStore) -> anyhow::Result<()> {
+        store.delete(ItemKind::SyncSecret, PREVIOUS_ID).await?;
+        Ok(())
+    }
+
+    /// This computer's device key from the keyring, made once.
+    pub async fn device_key(store: &SecretStore) -> anyhow::Result<Keys> {
+        if let Some(hex) = store.get(ItemKind::DeviceIdentity, DEVICE_ID).await? {
+            return Ok(Keys::parse(hex.trim())?);
+        }
+        let keys = Keys::generate();
+        store
+            .put(
+                ItemKind::DeviceIdentity,
+                DEVICE_ID,
+                "Peridot device key",
+                &keys.secret_key().to_secret_hex(),
+            )
+            .await?;
+        Ok(keys)
     }
 
     pub fn via_opal_mode(&self) -> bool {
@@ -90,11 +154,13 @@ impl Identity {
             anyhow::bail!("the keyring has a Peridot identity but no sync secret");
         };
         let secret = SyncSecret::from_hex(&secret)?;
+        let device = Self::device_key(store).await?;
         Ok(Some(match key.strip_prefix(OPAL_PREFIX) {
             Some(hex) => Self {
                 pubkey: PublicKey::from_hex(hex.trim())?,
                 keys: None,
                 secret,
+                device,
             },
             None => {
                 let keys = Keys::parse(&key)?;
@@ -102,6 +168,7 @@ impl Identity {
                     pubkey: keys.public_key(),
                     keys: Some(keys),
                     secret,
+                    device,
                 }
             }
         }))
@@ -129,12 +196,22 @@ impl Identity {
         store
             .put(ItemKind::DeviceIdentity, ITEM_ID, label, &value)
             .await?;
+        store
+            .put(
+                ItemKind::DeviceIdentity,
+                DEVICE_ID,
+                "Peridot device key",
+                &self.device.secret_key().to_secret_hex(),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn forget(store: &SecretStore) -> anyhow::Result<()> {
         store.delete(ItemKind::DeviceIdentity, ITEM_ID).await?;
         store.delete(ItemKind::SyncSecret, ITEM_ID).await?;
+        store.delete(ItemKind::SyncSecret, PREVIOUS_ID).await?;
+        store.delete(ItemKind::DeviceIdentity, DEVICE_ID).await?;
         Ok(())
     }
 
@@ -148,18 +225,32 @@ impl Identity {
         hex::encode(&h.finalize()[..16])
     }
 
-    /// The root event: the sync secret, NIP-44 encrypted to ourselves.
+    /// The root event (the "anchor"): the current sync secret, NIP-44
+    /// encrypted to ourselves, with a commitment to it in the clear so two
+    /// rotations racing each other can be told apart. The one thing under
+    /// your public key that says "Peridot"; recovery starts from it.
     pub async fn root_event(&self, signer: &dyn IdentitySigner) -> anyhow::Result<Event> {
         let hex = self.secret.to_hex();
         let body = serde_json::to_string(&RootRef {
-            v: 1,
+            v: if self.secret.is_legacy() { 1 } else { 2 },
             sync_secret: &hex,
         })?;
         let content = signer.nip44_self_encrypt(body).await?;
-        let unsigned = EventBuilder::new(Kind::Custom(DATA_KIND), content)
-            .tag(Tag::identifier(Self::root_name(&self.pubkey)))
-            .finalize_unsigned(self.pubkey);
+        let mut b = EventBuilder::new(Kind::Custom(DATA_KIND), content)
+            .tag(Tag::identifier(Self::root_name(&self.pubkey)));
+        if !self.secret.is_legacy() {
+            b = b.tag(Tag::custom("c", [self.secret.commitment()]));
+        }
+        let unsigned = b.finalize_unsigned(self.pubkey);
         Ok(signer.sign(unsigned).await?)
+    }
+
+    /// The commitment a root event carries (None for a legacy root).
+    pub fn root_commitment(root: &Event) -> Option<String> {
+        root.tags
+            .iter()
+            .find(|t| t.kind() == "c")
+            .and_then(|t| t.content().map(String::from))
     }
 
     /// Rebuild the identity from its root event, using whatever can decrypt
@@ -178,13 +269,21 @@ impl Identity {
         anyhow::ensure!(root.verify().is_ok(), "the root event isn't validly signed");
         let mut body = signer.nip44_self_decrypt(root.content.clone()).await?;
         let mut root: Root = serde_json::from_str(&body)?;
+        anyhow::ensure!(root.v <= 2, "this root event is from a newer Peridot");
         let secret = SyncSecret::from_hex(&root.sync_secret);
         zeroize::Zeroize::zeroize(&mut root.sync_secret);
         zeroize::Zeroize::zeroize(&mut body);
+        let secret = secret?;
+        anyhow::ensure!(
+            (root.v == 1) == secret.is_legacy(),
+            "root event version and secret form disagree"
+        );
         Ok(Self {
             pubkey,
             keys,
-            secret: secret?,
+            secret,
+            // A restored computer is a new device.
+            device: Keys::generate(),
         })
     }
 }
@@ -199,7 +298,6 @@ struct RootRef<'a> {
 /// …and owned when read (wiped by hand: no serde for `Zeroizing` here).
 #[derive(Deserialize)]
 struct Root {
-    #[allow(dead_code)]
     v: u8,
     sync_secret: String,
 }

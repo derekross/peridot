@@ -64,6 +64,10 @@ pub struct DeviceInfo {
     /// Set when this device was removed from your devices.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub removed: bool,
+    /// The device's own public key: the next sync secret is handed to it.
+    /// Missing on entries from the first protocol version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pubkey: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

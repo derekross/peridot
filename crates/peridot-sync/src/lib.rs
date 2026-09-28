@@ -12,6 +12,7 @@ pub mod identity;
 pub mod manifest;
 pub mod pairing;
 pub mod recovery;
+pub mod rotation;
 pub mod scan;
 pub mod share;
 pub mod signer;

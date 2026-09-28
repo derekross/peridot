@@ -619,6 +619,7 @@ impl Joiner {
                     pubkey,
                     keys,
                     secret,
+                    device: self.device.clone(),
                 };
                 let done_mac = session.mac("done", &[]);
                 let reply = send(

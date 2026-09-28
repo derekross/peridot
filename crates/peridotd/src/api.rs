@@ -818,6 +818,15 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             // Check every server now, and tidy up: with Opal holding the
             // key this is where deletions get their prompt.
             let engine = app.engine().await?;
+            // The previous epoch's leftovers, if its window has closed
+            // (a legacy epoch's need the identity's signature: here you
+            // are present to answer Opal).
+            let cleaned = app.cleanup_previous(true).await.unwrap_or(0);
+            let engine = if cleaned > 0 {
+                app.engine().await?
+            } else {
+                engine
+            };
             let mut report = engine.audit(Timestamp::now().as_secs()).await?;
             if !report.stale.is_empty() {
                 let signer = app.sharer().await?.signer.clone();
@@ -970,9 +979,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             if p.id == engine.device_id() {
                 bail!("to remove this computer, use \"Stop syncing here\"");
             }
-            engine.remove_device(&p.id).await?;
+            // Removing a computer cuts it off: every other computer moves
+            // to a new sync secret it never receives.
+            let epoch = app.rotate(std::slice::from_ref(&p.id)).await?;
             app.emit_state().await;
-            Ok(json!({"ok": true}))
+            Ok(json!({"ok": true, "epoch": epoch}))
+        }
+
+        "sync.rotate" => {
+            // A new sync secret for all your computers, on request.
+            let epoch = app.rotate(&[]).await?;
+            app.emit_state().await;
+            Ok(json!({"ok": true, "epoch": epoch}))
         }
 
         // ── Pairing ────────────────────────────────────────────────────

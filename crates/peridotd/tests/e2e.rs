@@ -72,7 +72,10 @@ impl Daemon {
             .arg(dir.path().join("peridot.db"))
             .arg("--home")
             .arg(&home)
-            .env("PERIDOT_LOG", "error")
+            .env(
+                "PERIDOT_LOG",
+                std::env::var("PERIDOT_TEST_LOG").unwrap_or_else(|_| "error".into()),
+            )
             .spawn()
             .unwrap();
         for _ in 0..100 {
@@ -665,7 +668,9 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
     })
     .await;
     assert_eq!(s["set_up"], json!(true));
-    assert_eq!(s["counts"]["in_sync"], json!(0));
+    // Settings sync regardless (the epoch's own key signs them); only the
+    // root event, which the identity signs, waits for the unlock.
+    assert_eq!(s["counts"]["in_sync"], json!(1));
     assert_eq!(opal.connects(), 1, "paired once during setup");
     assert_eq!(s["opal"]["paired"], json!(true), "{s}");
     assert_eq!(s["opal"]["needs_pairing"], json!(false));
@@ -744,25 +749,20 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
         "bind = SUPER, Return, exec, ghostty"
     );
 
-    // Locked Opal holds outgoing changes; unlocking lets them through.
+    // A locked Opal doesn't hold settings up any more: the epoch's own
+    // key signs them. Only the identity's own events wait for the unlock.
     opal.set_locked(true);
+    let signs = opal.signs();
     laptop.write(
         ".config/hypr/bindings.lua",
         "bind = SUPER, Return, exec, kitty",
     );
-    let s = until(&laptop, 20, "held while locked", |s| {
-        s["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("Unlock Opal"))
+    until(&laptop, 20, "published while locked", |s| {
+        s["counts"]["outgoing"] == json!(0) && s["counts"]["in_sync"] == json!(1)
     })
     .await;
-    assert_eq!(s["counts"]["outgoing"], json!(1));
+    assert_eq!(opal.signs(), signs, "Opal wasn't asked for a setting");
     opal.set_locked(false);
-    laptop.call("sync.now", json!(null)).await;
-    until(&laptop, 20, "published after unlock", |s| {
-        s["counts"]["outgoing"] == json!(0) && s["error"].is_null()
-    })
-    .await;
     until(&desk, 20, "desk sees it", |s| {
         s["counts"]["incoming"] == json!(1)
     })
@@ -1042,7 +1042,16 @@ async fn a_revoked_opal_pairing_is_retried_once_then_asks_you() {
     // Revoked in Opal's Apps view: the next signature fails, Peridot pairs
     // again by itself (a prompt in Opal's bar), and the change goes out.
     opal.revoke();
-    desk.write(".config/kitty/kitty.conf", "font_size 14");
+    // Settings sign themselves; the root event is what needs Opal. A
+    // rotation publishes it again, and finds the pairing gone.
+    let mut c = crate::Client::open(&desk.socket).await;
+    let _ = c.call("sync.rotate", json!(null)).await;
+    for _ in 0..150 {
+        if opal.connects() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     let s = until(&desk, 30, "re-paired and published", |s| {
         s["counts"]["outgoing"] == json!(0)
             && s["counts"]["in_sync"] == json!(1)
@@ -1056,7 +1065,7 @@ async fn a_revoked_opal_pairing_is_retried_once_then_asks_you() {
     // try, then it's up to you.
     opal.set_answer(Answer::Deny);
     opal.revoke();
-    desk.write(".config/kitty/kitty.conf", "font_size 15");
+    let _ = c.call("sync.rotate", json!(null)).await;
     let s = until(&desk, 30, "needs pairing", |s| {
         s["opal"]["needs_pairing"] == json!(true)
             && s["error"]
@@ -1095,9 +1104,10 @@ async fn a_refused_opal_signature_keeps_the_change_and_stops_asking() {
 
     opal.set_answer(Answer::Deny);
     desk.write(".config/kitty/kitty.conf", "font_size 13");
-    // The refusal itself, or (after a retry) the hold it started.
+    // The change itself syncs (the epoch's key signs it); the root event,
+    // which Opal signs, is refused and held.
     let s = until(&desk, 20, "held after a no", |s| {
-        s["counts"]["outgoing"] == json!(1)
+        s["counts"]["in_sync"] == json!(1)
             && s["error"]
                 .as_str()
                 .is_some_and(|e| e.contains("didn't allow") || e.contains("ask again"))
@@ -1765,14 +1775,19 @@ async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
         .unwrap_err();
     assert!(e.contains("Opal holds your key"), "{e}");
 
-    // Opal signs now, and the laptop (same sync secret) still gets changes.
+    // Settings still sync (signed by the epoch's own key, so Opal isn't
+    // asked), and the laptop (same sync secret) still gets changes.
     let signs = opal.signs();
     desk.write(".config/kitty/kitty.conf", "font_size 14");
-    until(&desk, 30, "published via Opal", |s| {
+    until(&desk, 30, "published", |s| {
         s["counts"]["outgoing"] == json!(0)
     })
     .await;
-    assert!(opal.signs() > signs, "Opal signed the change");
+    assert_eq!(
+        opal.signs(),
+        signs,
+        "items are signed by the sync key, not Opal"
+    );
     laptop.call("sync.now", json!(null)).await;
     until(&laptop, 30, "laptop sees it", |s| {
         s["counts"]["incoming"] == json!(1)
@@ -1962,4 +1977,315 @@ async fn pairing_attempts_are_rate_limited() {
         .await
         .unwrap_err();
     assert!(e.contains("too many"), "{e}");
+}
+
+// ── Epochs: removal, adoption, migration, recovery ───────────────────
+
+/// Three computers on one identity, paired in a chain.
+async fn three_paired(url: &str) -> (Daemon, Daemon, Daemon) {
+    let desk = Daemon::start(url, "Desk").await;
+    let laptop = Daemon::start(url, "Laptop").await;
+    let spare = Daemon::start(url, "Spare").await;
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "desk published", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    for joiner in [&laptop, &spare] {
+        let code = joiner.call("pair.new", json!(null)).await["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        desk.call("pair.join", json!({"code": code})).await;
+        until(&desk, 20, "number", |s| {
+            s["pairing"]["stage"] == json!("confirm")
+        })
+        .await;
+        until(joiner, 20, "number", |s| {
+            s["pairing"]["stage"] == json!("confirm")
+        })
+        .await;
+        desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+            .await;
+        joiner
+            .call("pair.confirm", json!({"confirm": true, "matches": true}))
+            .await;
+        until(joiner, 20, "joined", |s| s["set_up"] == json!(true)).await;
+        desk.call("pair.cancel", json!(null)).await;
+    }
+    // Everyone has announced (the desk knows both device keys).
+    until(&desk, 30, "desk sees three computers", |s| {
+        s["devices"].as_array().map(Vec::len) == Some(3)
+    })
+    .await;
+    (desk, laptop, spare)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_a_computer_rotates_and_it_stops_receiving() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let (desk, laptop, spare) = three_paired(&url).await;
+    until(&spare, 30, "spare has the file", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    until(&laptop, 30, "laptop has the file", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    spare
+        .call("apply", json!({"paths": [".config/kitty/kitty.conf"]}))
+        .await;
+    for d in [&desk, &laptop, &spare] {
+        assert_eq!(d.status().await["identity"]["epoch"], json!(1));
+    }
+
+    // The desk removes the laptop: a new epoch for the desk and the spare.
+    let laptop_id = laptop.status().await["device_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let r = desk.call("device.remove", json!({"id": laptop_id})).await;
+    assert_eq!(r["epoch"], json!(2));
+    until(&desk, 30, "desk on epoch 2", |s| {
+        s["identity"]["epoch"] == json!(2)
+    })
+    .await;
+    until(&spare, 60, "spare adopts epoch 2", |s| {
+        s["identity"]["epoch"] == json!(2)
+    })
+    .await;
+    let s = until(&laptop, 60, "laptop told it was removed", |s| {
+        s["error"].as_str().is_some_and(|e| e.contains("removed"))
+    })
+    .await;
+    assert_eq!(s["set_up"], json!(false), "{s}");
+    assert!(desk.status().await["identity"]["window_until"].is_u64());
+
+    // New changes reach the spare and never the laptop.
+    desk.write(".config/kitty/kitty.conf", "font_size 14");
+    until(&spare, 60, "spare gets the change", |s| {
+        s["files"]
+            .as_array()
+            .is_some_and(|f| f.iter().any(|f| f["status"] == json!("incoming")))
+    })
+    .await;
+    spare
+        .call("apply", json!({"paths": [".config/kitty/kitty.conf"]}))
+        .await;
+    assert_eq!(
+        spare.read(".config/kitty/kitty.conf").unwrap(),
+        "font_size 14"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(
+        laptop.read(".config/kitty/kitty.conf").is_none(),
+        "the laptop never applied anything"
+    );
+    // And the spare's own changes go under the new epoch too.
+    spare.write(".config/kitty/kitty.conf", "font_size 15");
+    until(&desk, 60, "desk gets the spare's change", |s| {
+        s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    assert_eq!(
+        desk.status().await["devices"].as_array().map(Vec::len),
+        Some(2),
+        "the laptop is gone from the list"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_opal_identity_rotates_without_prompts() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
+    desk.call("setup.use_opal", json!({})).await;
+    until(&desk, 20, "set up", |s| {
+        s["set_up"] == json!(true) && s["error"].is_null()
+    })
+    .await;
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    until(&desk, 20, "published", |s| {
+        s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    // Opal only ever signs the root event (kind 30078) and encrypts to
+    // itself; deletions and items are the epoch key's business.
+    opal.set_answer(Answer::DenySensitive);
+    let signs = opal.signs();
+    let r = desk.call("sync.rotate", json!(null)).await;
+    assert_eq!(r["epoch"], json!(2));
+    let s = until(&desk, 30, "epoch 2, everything republished", |s| {
+        s["identity"]["epoch"] == json!(2)
+            && s["counts"]["in_sync"] == json!(1)
+            && s["error"].is_null()
+    })
+    .await;
+    assert!(s["identity"]["window_until"].is_u64());
+    // The new epoch's root event is the one thing Opal signs.
+    for _ in 0..50 {
+        if opal.signs() > signs {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(opal.signs(), signs + 1, "one signature: the root event");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recovery_kit_restores_after_a_rotation() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let old = Daemon::start(&url, "Old").await;
+    old.write(".config/kitty/kitty.conf", "font_size 13");
+    old.call("setup.start_fresh", json!(null)).await;
+    until(&old, 20, "publish", |s| s["counts"]["in_sync"] == json!(1)).await;
+    let kit = old.call("recovery.create", json!({"confirm": true})).await;
+    old.call("sync.rotate", json!(null)).await;
+    until(&old, 30, "epoch 2", |s| {
+        s["identity"]["epoch"] == json!(2) && s["counts"]["in_sync"] == json!(1)
+    })
+    .await;
+    old.write(".config/kitty/kitty.conf", "font_size 14");
+    until(&old, 20, "published under epoch 2", |s| {
+        s["counts"]["outgoing"] == json!(0)
+    })
+    .await;
+
+    let new = Daemon::start(&url, "New").await;
+    new.call(
+        "recovery.restore",
+        json!({"code": kit["code"], "words": kit["words"]}),
+    )
+    .await;
+    let s = until(&new, 30, "restored on the current epoch", |s| {
+        s["set_up"] == json!(true) && s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    assert_eq!(s["identity"]["epoch"], json!(2), "{s}");
+    new.call("apply", json!({"paths": [".config/kitty/kitty.conf"]}))
+        .await;
+    assert_eq!(
+        new.read(".config/kitty/kitty.conf").unwrap(),
+        "font_size 14"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_version_data_is_moved_to_epoch_one() {
+    use nostr_sdk::prelude::*;
+    use peridot_sync::identity::Identity;
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let relay_url = RelayUrl::parse(&url).unwrap();
+
+    // Settings published by the first protocol version: items and root
+    // signed by the identity, sealed with a legacy (epoch 0) secret.
+    let keys = Keys::generate();
+    let legacy = Identity::from_keys(keys.clone()).with_secret(
+        peridot_sync::crypto::SyncSecret::legacy(peridot_sync::crypto::random_bytes()),
+    );
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(home.path().join(".config/kitty")).unwrap();
+    std::fs::write(home.path().join(".config/kitty/kitty.conf"), "font_size 13").unwrap();
+    let db = opal_core::db::Db::open_in_memory().unwrap();
+    let engine = peridot_sync::sync::SyncEngine::new(peridot_sync::sync::SyncParams {
+        identity: legacy.clone(),
+        previous: None,
+        signer: std::sync::Arc::new(peridot_sync::signer::LocalSigner(keys.clone())),
+        store: peridot_sync::store::SyncStore::new(db.clone()).unwrap(),
+        outbox: opal_kit::relays::Outbox::new(db).unwrap(),
+        home: peridot_sync::apply::Home::open(home.path()).unwrap(),
+        manifest: peridot_sync::manifest::Manifest::new(Default::default()),
+        client: nostr_sdk::client::Client::default(),
+        relays: vec![relay_url.clone()],
+        backups_dir: home.path().join("backups"),
+        device_name: "Old desk".into(),
+        version: "0.1.1".into(),
+    })
+    .unwrap();
+    engine.connect().await;
+    engine.catch_up().await.unwrap();
+    assert_eq!(engine.epoch(), 0);
+    engine.publish_root().await.unwrap();
+    engine.announce().await.unwrap();
+    let report = engine.publish_changes().await.unwrap();
+    assert_eq!(report.published.len(), 1);
+    assert_eq!(
+        engine.sync_pubkey(),
+        keys.public_key(),
+        "legacy items are the identity's"
+    );
+    engine.client().shutdown().await;
+
+    // A new-version computer takes the key: it reads the legacy root, then
+    // moves everything to epoch 1 under the sync key.
+    let desk = Daemon::start(&url, "Desk").await;
+    desk.call(
+        "setup.import",
+        json!({"secret": keys.secret_key().to_secret_hex()}),
+    )
+    .await;
+    let s = until(&desk, 40, "moved to epoch 1", |s| {
+        s["set_up"] == json!(true) && s["identity"]["epoch"] == json!(1) && s["error"].is_null()
+    })
+    .await;
+    assert_eq!(
+        s["counts"]["incoming"],
+        json!(1),
+        "the old setting came along: {s}"
+    );
+    assert!(s["identity"]["window_until"].is_u64());
+    // The root on the servers is the new form now.
+    let client = nostr_sdk::client::Client::default();
+    client.add_relay(&relay_url).await.unwrap();
+    client.connect().and_wait(Duration::from_secs(3)).await;
+    let root_filter = Filter::new()
+        .author(keys.public_key())
+        .kind(Kind::Custom(30078))
+        .identifier(Identity::root_name(&keys.public_key()));
+    let mut root = None;
+    for _ in 0..100 {
+        let roots = client
+            .fetch_events(vec![(relay_url.clone(), vec![root_filter.clone()])])
+            .timeout(Duration::from_secs(5))
+            .await
+            .unwrap();
+        root = roots.iter().max_by_key(|e| e.created_at).cloned();
+        if root
+            .as_ref()
+            .is_some_and(|r| Identity::root_commitment(r).is_some())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        root.as_ref()
+            .is_some_and(|r| Identity::root_commitment(r).is_some()),
+        "root is v2: {root:?}"
+    );
+    client.shutdown().await;
+
+    // A second old-version computer that comes back is told to pair again.
+    let stale = Daemon::start(&url, "Stale").await;
+    stale
+        .call(
+            "setup.import",
+            json!({"secret": keys.secret_key().to_secret_hex()}),
+        )
+        .await;
+    let s = until(&stale, 40, "stale told to pair again", |s| {
+        s["identity"]["epoch"] == json!(1)
+            || s["error"].as_str().is_some_and(|e| e.contains("Pair"))
+    })
+    .await;
+    // Importing the key reads the current (v2) root, so it simply joins
+    // epoch 1; only a computer still holding a legacy secret is stale.
+    assert_eq!(s["identity"]["epoch"], json!(1), "{s}");
 }

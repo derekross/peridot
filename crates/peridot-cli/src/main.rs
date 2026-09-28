@@ -204,10 +204,13 @@ enum Cmd {
     /// Check your sync servers now: send again what any of them lacks,
     /// refresh what's getting old, and drop old chunks nothing refers to.
     Tidy,
-    /// Remove a computer from your list.
+    /// Remove a computer: your other computers move to a new sync key it
+    /// never receives, so it stops getting your settings.
     RemoveDevice {
         id: String,
     },
+    /// Move all your computers to a new sync key now.
+    Rotate,
     /// Make a recovery kit (six words and a recovery code).
     Recovery,
     /// Restore from a recovery kit on a new computer.
@@ -1276,8 +1279,15 @@ async fn run() -> Result<()> {
             }
         }
         Cmd::RemoveDevice { id } => {
-            c.call("device.remove", json!({"id": id})).await?;
-            println!("Removed.");
+            let r = c.call("device.remove", json!({"id": id})).await?;
+            println!(
+                "Removed. Your other computers move to sync key {} now; that computer keeps what it already had and gets nothing new.",
+                r["epoch"]
+            );
+        }
+        Cmd::Rotate => {
+            let r = c.call("sync.rotate", json!(null)).await?;
+            println!("Your computers are moving to sync key {}.", r["epoch"]);
         }
         Cmd::Recovery => {
             println!("{APPROVAL_HINT}");

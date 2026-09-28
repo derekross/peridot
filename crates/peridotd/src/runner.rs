@@ -65,12 +65,54 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             }
         }
     }
+    // Still on the first protocol version: move to epoch 1 now (another
+    // computer may have done it already, in which case this one has to
+    // pair again: it never got the new secret).
+    if engine.epoch() == 0 {
+        match engine.fetch_root().await {
+            Ok(Some(root))
+                if peridot_sync::identity::Identity::root_commitment(&root).is_some() =>
+            {
+                app.set_error(Some(
+                    "Your other computers moved to a newer Peridot. Pair this computer again to keep syncing."
+                        .into(),
+                ))
+                .await;
+                app.emit_state().await;
+                return Ok(());
+            }
+            Ok(_) => {
+                tracing::info!("moving to epoch 1");
+                app.rotate(&[]).await?;
+                // The new engine has taken over.
+                return Ok(());
+            }
+            Err(e) => {
+                app.set_error(Some(format!("Waiting for your sync servers: {e}")))
+                    .await;
+                app.emit_state().await;
+                return Err(e);
+            }
+        }
+    }
     setup_publishes(&app, &engine, &mut root_pending, &mut announced).await;
+    if app.db.get_kv("peridot.republish_pending")?.as_deref() == Some("1") {
+        match engine.republish_everything().await {
+            Ok(n) => {
+                tracing::info!("said {n} item(s) again under the new keys");
+                let _ = app.db.set_kv("peridot.republish_pending", "0");
+            }
+            Err(e) => tracing::warn!("couldn't republish under the new keys yet: {e}"),
+        }
+    }
     if !app.config.read().await.paused {
         publish(&app, &engine).await;
     }
     app.mark_synced();
     app.emit_state().await;
+    if rotated(&app, &engine).await {
+        return Ok(());
+    }
     let mut waiting = incoming(&engine).await;
     if Timestamp::now()
         .as_secs()
@@ -81,7 +123,10 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
     }
 
     let mut notifications = engine.client().notifications();
-    let since = Timestamp::now().as_secs().saturating_sub(60);
+    // Items are dated to the hour: look back past the current bucket.
+    let since = Timestamp::now()
+        .as_secs()
+        .saturating_sub(peridot_sync::sync::CATCH_UP_MARGIN);
     let relays = engine.relays().await;
     let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
         .iter()
@@ -113,6 +158,9 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
                 if let ClientNotification::Event { event, .. } = n
                     && engine.ingest(&event)
                 {
+                    if rotated(&app, &engine).await {
+                        return Ok(());
+                    }
                     after_incoming(&app, &engine, &mut waiting).await;
                 }
             }
@@ -135,6 +183,9 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
                 setup_publishes(&app, &engine, &mut root_pending, &mut announced).await;
                 let paused = app.config.read().await.paused;
                 if engine.catch_up().await.is_ok_and(|n| n > 0) {
+                    if rotated(&app, &engine).await {
+                        return Ok(());
+                    }
                     after_incoming(&app, &engine, &mut waiting).await;
                 }
                 if !paused {
@@ -159,6 +210,9 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             }
             _ = catch_up.tick() => {
                 if engine.catch_up().await.is_ok_and(|n| n > 0) {
+                    if rotated(&app, &engine).await {
+                        return Ok(());
+                    }
                     after_incoming(&app, &engine, &mut waiting).await;
                 }
                 // Top-level files (.XCompose, .bashrc) aren't watched.
@@ -173,11 +227,41 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             _ = heartbeat.tick() => {
                 let _ = engine.announce().await;
                 audit(&app, &engine).await;
+                match app.cleanup_previous(false).await {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        tracing::info!("the previous epoch's {n} item(s) were removed");
+                        // The engine was restarted without the old keys.
+                        return Ok(());
+                    }
+                    Err(e) => tracing::info!("the previous epoch stays for now: {e}"),
+                }
             }
         }
     }
     drop(watcher);
     Ok(())
+}
+
+/// A rotation another computer announced: switch this engine over, or
+/// stop if this computer was left out. True when this engine is done.
+async fn rotated(app: &Arc<App>, engine: &Arc<SyncEngine>) -> bool {
+    use peridot_sync::rotation::Rotation;
+    match engine.take_pending_rotation() {
+        None => false,
+        Some(Rotation::Adopt { secret, .. }) => {
+            match app.adopt_epoch(secret).await {
+                Ok(()) => {}
+                Err(e) => tracing::warn!("couldn't move to the new epoch: {e}"),
+            }
+            true
+        }
+        Some(Rotation::Removed { epoch }) => {
+            tracing::warn!("this computer was left out of epoch {epoch}");
+            app.removed_elsewhere().await;
+            true
+        }
+    }
 }
 
 /// Check the servers: fill gaps, refresh old items, and (when the key is
@@ -243,7 +327,17 @@ async fn publish(app: &Arc<App>, engine: &Arc<SyncEngine>) {
                     report.deleted.len()
                 );
             }
-            app.set_error(None).await;
+            // Settings sign themselves; a root event still waiting on the
+            // identity's signer keeps its message.
+            let keep = app
+                .last_error
+                .read()
+                .await
+                .as_deref()
+                .is_some_and(|e| e.ends_with("(finishing setup)"));
+            if !keep {
+                app.set_error(None).await;
+            }
         }
         Err(e) => app.set_error(Some(e.to_string())).await,
     }
