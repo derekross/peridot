@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 const KIND_BLOSSOM_AUTH: u16 = 24242;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long a signed Blossom authorization stays valid. Each attempt at
+/// each server gets a fresh one, so a captured header is worth little.
+const AUTH_TTL: u64 = 300;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Share {
@@ -195,7 +198,7 @@ impl Sharer {
         let expires = now + keep_for.as_secs();
         let mut last_err = anyhow::anyhow!("no share server is configured");
         for server in &self.servers {
-            match self.upload(server, &sealed, expires).await {
+            match self.upload(server, &sealed).await {
                 Ok(()) => {
                     let host = server
                         .trim_start_matches("https://")
@@ -318,10 +321,11 @@ impl Sharer {
     /// first server that takes it. Returns its address.
     pub async fn upload_public(&self, data: &[u8], mime: &str) -> anyhow::Result<String> {
         let sha256 = peridot_sync::crypto::sha256_hex(data);
-        let expires = Timestamp::now().as_secs() + 600;
         let mut last_err = anyhow::anyhow!("no share server is configured");
         for server in &self.servers {
-            let auth = self.auth("upload", &sha256, expires).await?;
+            let auth = self
+                .auth("upload", &sha256, Timestamp::now().as_secs() + AUTH_TTL)
+                .await?;
             let res = self
                 .http
                 .put(format!("{}/upload", server.trim_end_matches('/')))
@@ -334,11 +338,7 @@ impl Sharer {
             match res {
                 Ok(res) if res.status().is_success() => {
                     let desc: serde_json::Value = res.json().await.unwrap_or_default();
-                    if let Some(url) = desc["url"].as_str().filter(|u| u.starts_with("https://")) {
-                        return Ok(url.to_string());
-                    }
-                    let ext = mime.split('/').nth(1).unwrap_or("bin");
-                    return Ok(format!("{}/{sha256}.{ext}", server.trim_end_matches('/')));
+                    return Ok(public_url(server, &sha256, mime, desc["url"].as_str()));
                 }
                 Ok(res) => {
                     last_err = anyhow::anyhow!("{server} refused the upload ({})", res.status())
@@ -350,8 +350,14 @@ impl Sharer {
     }
 
     /// BUD-01: `PUT /upload` with a signed kind 24242 authorization.
-    async fn upload(&self, server: &str, sealed: &Sealed, expires: u64) -> anyhow::Result<()> {
-        let auth = self.auth("upload", &sealed.sha256, expires).await?;
+    async fn upload(&self, server: &str, sealed: &Sealed) -> anyhow::Result<()> {
+        let auth = self
+            .auth(
+                "upload",
+                &sealed.sha256,
+                Timestamp::now().as_secs() + AUTH_TTL,
+            )
+            .await?;
         let res = self
             .http
             .put(format!("{}/upload", server.trim_end_matches('/')))
@@ -392,7 +398,7 @@ impl Sharer {
     /// BUD-02: `DELETE /<sha256>` with a signed authorization.
     async fn delete(&self, server: &str, sha256: &str) -> anyhow::Result<()> {
         let auth = self
-            .auth("delete", sha256, Timestamp::now().as_secs() + 300)
+            .auth("delete", sha256, Timestamp::now().as_secs() + AUTH_TTL)
             .await?;
         let res = self
             .http
@@ -419,6 +425,20 @@ impl Sharer {
             base64::engine::general_purpose::STANDARD.encode(ev.as_json())
         ))
     }
+}
+
+/// Where a public upload ended up: the server's word for it when that's
+/// an https address naming the blob by its hash, else the address every
+/// Blossom server serves it at.
+fn public_url(server: &str, sha256: &str, mime: &str, returned: Option<&str>) -> String {
+    if let Some(url) = returned
+        && url.starts_with("https://")
+        && url.contains(sha256)
+    {
+        return url.to_string();
+    }
+    let ext = mime.split('/').nth(1).unwrap_or("bin");
+    format!("{}/{sha256}.{ext}", server.trim_end_matches('/'))
 }
 
 /// `YYYY-MM-DD` (UTC).
@@ -451,7 +471,175 @@ pub fn spawn_sweeper(sharer: Arc<Sharer>) {
 mod tests {
     use super::*;
     use futures::future::BoxFuture;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
+
+    /// A server that answers every request the same way and keeps the
+    /// authorization events it was shown.
+    async fn answering(
+        status: &'static str,
+        body: &'static str,
+    ) -> (String, Arc<Mutex<Vec<Event>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut s, _)) = listener.accept().await else {
+                    break;
+                };
+                let log = log.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 8192];
+                    let (head, len) = loop {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            return;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..i]).to_string();
+                            let len = head
+                                .lines()
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                })
+                                .unwrap_or(0);
+                            break (head, i + 4 + len);
+                        }
+                    };
+                    while buf.len() < len {
+                        let n = s.read(&mut tmp).await.unwrap_or(0);
+                        if n == 0 {
+                            break;
+                        }
+                        buf.extend_from_slice(&tmp[..n]);
+                    }
+                    if let Some(a) = head.lines().find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+                            .map(|(_, v)| v.trim().to_string())
+                    }) && let Some(b64) = a.strip_prefix("Nostr ")
+                        && let Ok(json) = base64::engine::general_purpose::STANDARD.decode(b64)
+                        && let Ok(ev) = Event::from_json(&json)
+                    {
+                        log.lock().unwrap().push(ev);
+                    }
+                    let r = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = s.write_all(r.as_bytes()).await;
+                });
+            }
+        });
+        (base, seen)
+    }
+
+    fn expiration(ev: &Event) -> u64 {
+        ev.tags
+            .iter()
+            .find(|t| t.kind().to_string() == "expiration")
+            .and_then(|t| t.content())
+            .and_then(|v| v.parse().ok())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_attempt_gets_a_fresh_short_lived_authorization() {
+        let (first, seen_first) = answering("500 Internal Server Error", "").await;
+        let (second, seen_second) = answering("500 Internal Server Error", "").await;
+        let keys = Keys::generate();
+        let sharer = Sharer::new(
+            ShareStore::new(Db::open_in_memory().unwrap()).unwrap(),
+            Arc::new(peridot_sync::signer::LocalSigner(keys)),
+            vec![first, second],
+            "https://example.test/s".into(),
+        )
+        .unwrap();
+        let now = Timestamp::now().as_secs();
+        // A link kept for a week: the authorizations still last minutes.
+        assert!(
+            sharer
+                .share(
+                    "x.txt",
+                    "text/plain",
+                    b"hello",
+                    Duration::from_secs(7 * 86_400)
+                )
+                .await
+                .is_err()
+        );
+        let a = seen_first.lock().unwrap().clone();
+        let b = seen_second.lock().unwrap().clone();
+        assert_eq!((a.len(), b.len()), (1, 1));
+        for ev in [&a[0], &b[0]] {
+            assert!(ev.verify().is_ok());
+            assert_eq!(ev.kind.as_u16(), KIND_BLOSSOM_AUTH);
+            let exp = expiration(ev);
+            assert!(
+                (now + AUTH_TTL - 5..=now + AUTH_TTL + 5).contains(&exp),
+                "{exp}"
+            );
+        }
+
+        // The same for public uploads.
+        assert!(sharer.upload_public(b"png", "image/png").await.is_err());
+        let a = seen_first.lock().unwrap().clone();
+        let b = seen_second.lock().unwrap().clone();
+        assert_eq!((a.len(), b.len()), (2, 2));
+        assert!(expiration(&a[1]) <= now + AUTH_TTL + 5);
+    }
+
+    #[tokio::test]
+    async fn a_public_upload_is_addressed_by_its_hash() {
+        let sha = peridot_sync::crypto::sha256_hex(b"png");
+        // The server names it something else: the address is built here.
+        let (server, _) = answering(
+            "200 OK",
+            r#"{"url":"https://cdn.example/somewhere-else.png"}"#,
+        )
+        .await;
+        let sharer = Sharer::new(
+            ShareStore::new(Db::open_in_memory().unwrap()).unwrap(),
+            Arc::new(peridot_sync::signer::LocalSigner(Keys::generate())),
+            vec![server.clone()],
+            "https://example.test/s".into(),
+        )
+        .unwrap();
+        assert_eq!(
+            sharer.upload_public(b"png", "image/png").await.unwrap(),
+            format!("{server}/{sha}.png")
+        );
+        assert_eq!(
+            public_url(
+                "https://b.example/",
+                &sha,
+                "image/png",
+                Some(&format!("https://b.example/{sha}"))
+            ),
+            format!("https://b.example/{sha}")
+        );
+        assert_eq!(
+            public_url(
+                "https://b.example",
+                &sha,
+                "image/png",
+                Some(&format!("http://b.example/{sha}.png"))
+            ),
+            format!("https://b.example/{sha}.png"),
+            "not over plain http"
+        );
+        assert_eq!(
+            public_url("https://b.example", &sha, "image/jpeg", None),
+            format!("https://b.example/{sha}.jpeg")
+        );
+    }
 
     /// A signer that always says "not now", counting the asks.
     struct SaysNo(AtomicUsize);
