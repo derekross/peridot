@@ -20,6 +20,17 @@ pub fn opal_pairing_needed() {
     );
 }
 
+/// The `peridot` command asked for something only the panel may allow.
+pub fn approval_needed(summary: &str) {
+    send(
+        "Peridot is asking for your OK",
+        &format!(
+            "The peridot command wants to {}. Open Peridot to allow or refuse it.",
+            clean(summary)
+        ),
+    );
+}
+
 fn send(title: &str, body: &str) {
     let mut cmd;
     if which("omarchy-notification-send") {

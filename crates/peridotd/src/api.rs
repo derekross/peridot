@@ -25,8 +25,92 @@ fn parse<T: DeserializeOwned>(params: Value) -> Result<T> {
     Ok(serde_json::from_value(params)?)
 }
 
+/// Every request from the socket: class the method, tell who's asking,
+/// apply the limits, and route dangerous things through the panel.
+pub async fn dispatch_gated(
+    app: &Arc<App>,
+    peer: &opal_kit::ipc::Peer,
+    method: &str,
+    mut params: Value,
+) -> Result<Value> {
+    use crate::authz::{Caller, Class};
+    let Some(class) = crate::authz::classify(method) else {
+        bail!("unknown method: {method}");
+    };
+    let caller = app.trust.caller(peer);
+    let now = Timestamp::now().as_secs();
+    app.limits.check(caller, class, method, now)?;
+    // `confirm` and `force` are the panel's words, never a caller's data.
+    let confirm = params
+        .as_object_mut()
+        .and_then(|m| m.remove("confirm"))
+        .is_some_and(|v| v == json!(true));
+    let force = params
+        .as_object_mut()
+        .and_then(|m| m.remove("force"))
+        .is_some_and(|v| v == json!(true));
+    match (class, caller) {
+        (Class::Read | Class::Routine, _) => {}
+        (Class::Sensitive | Class::Dangerous, Caller::Other) => {
+            bail!("only Peridot's own panel and the peridot command may do that")
+        }
+        (Class::Sensitive, _) => {}
+        (Class::Dangerous, Caller::Panel) => {
+            if method != "approvals.answer" && !confirm {
+                bail!("this needs to be confirmed in the panel");
+            }
+        }
+        (Class::Dangerous, Caller::Cli) => {
+            if method == "approvals.answer" {
+                bail!("only the panel answers approvals");
+            }
+            let summary = crate::authz::describe(method, &params);
+            let (pending, rx) = app
+                .approvals
+                .open(method, summary.clone(), caller.name(), now);
+            app.emit("approval", json!(pending));
+            app.emit_state().await;
+            crate::notify::approval_needed(&summary);
+            let ok = tokio::time::timeout(crate::approvals::APPROVAL_TIMEOUT, rx).await;
+            app.approvals.forget(pending.id);
+            app.emit_state().await;
+            match ok {
+                Ok(Ok(true)) => app.limits.allowed(),
+                Ok(Ok(false)) => {
+                    app.limits.denied(now);
+                    bail!("not allowed in Peridot's panel");
+                }
+                _ => bail!("Peridot's panel didn't answer; open it and try again"),
+            }
+        }
+    }
+    if force && matches!(method, "share.file" | "share.text") && caller == Caller::Panel {
+        params["_force"] = json!(true);
+    }
+    dispatch(app, method, params).await
+}
+
 pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Value> {
     match method {
+        "approvals.list" => Ok(json!(app.approvals.list())),
+        "approvals.answer" => {
+            #[derive(Deserialize)]
+            struct P {
+                id: u64,
+                ok: bool,
+            }
+            let p: P = parse(params)?;
+            if !app.approvals.answer(p.id, p.ok) {
+                bail!("that request is gone");
+            }
+            Ok(json!({"ok": true}))
+        }
+        "pair.view" => {
+            // The pairing with its code, for the panel and the command only
+            // (the general snapshot leaves the code out).
+            let v = app.pairing.lock().await.as_ref().map(|p| p.view());
+            Ok(json!(v))
+        }
         "status" => Ok(app.snapshot().await),
 
         // ── Getting started ────────────────────────────────────────────
@@ -197,19 +281,39 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 name: Option<String>,
                 #[serde(default)]
                 expire_days: Option<u32>,
+                /// The panel showed the warning and you went ahead.
+                #[serde(default, rename = "_force")]
+                force: bool,
             }
             let p: P = parse(params)?;
             let path = std::path::Path::new(&p.path);
             anyhow::ensure!(path.is_absolute(), "give the file's full path");
-            let meta = tokio::fs::metadata(path)
+            // Never anything the sync would refuse: keys, keyrings, other
+            // apps' credentials; nor system files.
+            for root in ["/etc", "/proc", "/sys", "/dev", "/run", "/var", "/boot"] {
+                anyhow::ensure!(!path.starts_with(root), "that isn't something to share");
+            }
+            if let Ok(rel) = path.strip_prefix(&app.home)
+                && let Some(rel) = rel.to_str()
+                && Manifest::new(Default::default()).tier(rel)
+                    == Some(peridot_sync::manifest::Tier::Never)
+            {
+                bail!(
+                    "{} looks like a key or a credential; Peridot won't share it",
+                    p.path
+                );
+            }
+            let data = read_for_share(path)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}: {e}", p.path))?;
-            anyhow::ensure!(meta.is_file(), "{} isn't a file", p.path);
-            anyhow::ensure!(
-                meta.len() as usize <= peridot_sync::share::MAX_SHARE_BYTES,
-                "that file is too big to share (64 MB at most)"
-            );
-            let data = tokio::fs::read(path).await?;
+            if !p.force
+                && let Some(what) = peridot_sync::manifest::looks_secret(&data)
+            {
+                bail!(
+                    "{} seems to hold {what}; share it anyway from the panel if you're sure",
+                    p.path
+                );
+            }
             let name = p.name.unwrap_or_else(|| {
                 path.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
@@ -243,9 +347,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
                 name: Option<String>,
                 #[serde(default)]
                 expire_days: Option<u32>,
+                #[serde(default, rename = "_force")]
+                force: bool,
             }
             let p: P = parse(params)?;
             anyhow::ensure!(!p.text.trim().is_empty(), "nothing to share");
+            if !p.force
+                && let Some(what) = peridot_sync::manifest::looks_secret(p.text.as_bytes())
+            {
+                bail!(
+                    "the clipboard seems to hold {what}; share it anyway from the panel if you're sure"
+                );
+            }
             let name = p.name.unwrap_or_else(|| "clipboard.txt".into());
             let days = p
                 .expire_days
@@ -843,12 +956,18 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
             Ok(json!(pair::start_existing(app, &p.code).await?))
         }
         "pair.confirm" => {
+            // On either computer. `hold_key` (sharing side) also hands the
+            // identity's own key over. On until the sync key no longer
+            // needs it (protocol v2): a computer paired from a local key
+            // can't sign otherwise.
             #[derive(Deserialize)]
             struct P {
                 matches: bool,
+                #[serde(default = "yes")]
+                hold_key: bool,
             }
             let p: P = parse(params)?;
-            pair::confirm(app, p.matches).await?;
+            pair::confirm(app, p.matches, p.hold_key).await?;
             Ok(json!({"ok": true}))
         }
         "pair.cancel" => {
@@ -994,6 +1113,32 @@ pub async fn dispatch(app: &Arc<App>, method: &str, params: Value) -> Result<Val
 
 fn yes() -> bool {
     true
+}
+
+/// Read a file to share: never through a symlink, never past the cap
+/// (the size is checked while reading, not before).
+async fn read_for_share(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NOCTTY)
+            .open(&path)?;
+        if !f.metadata()?.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
+        let cap = peridot_sync::share::MAX_SHARE_BYTES as u64;
+        let mut data = Vec::new();
+        f.take(cap + 1).read_to_end(&mut data)?;
+        if data.len() as u64 > cap {
+            return Err(std::io::Error::other("too big to share (64 MB at most)"));
+        }
+        Ok(data)
+    })
+    .await
+    .map_err(|e| std::io::Error::other(e.to_string()))?
 }
 
 /// The newest screenshot in the usual folder, if any.

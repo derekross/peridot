@@ -1998,6 +1998,7 @@ dependencies = [
  "clap",
  "futures",
  "hex",
+ "libc",
  "nostr-sdk",
  "notify",
  "opal-core",

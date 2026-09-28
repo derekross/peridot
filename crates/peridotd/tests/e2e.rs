@@ -52,6 +52,10 @@ impl Daemon {
         let socket = dir.path().join("peridot.sock");
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_peridotd"));
         cmd.args(["--memory-keyring", "--socket"]).arg(&socket);
+        // The test binary plays the panel (dangerous methods need it).
+        if std::env::var_os("PERIDOT_TEST_UNTRUSTED").is_none() {
+            cmd.arg("--panel-exe").arg(std::env::current_exe().unwrap());
+        }
         // Point at a socket that doesn't exist when there's no Opal.
         cmd.arg("--opal-socket").arg(
             opal.map(|p| p.to_path_buf())
@@ -196,7 +200,18 @@ async fn pair_then_sync_a_change() {
     assert_eq!(d["pairing"]["number"], l["pairing"]["number"]);
     assert_eq!(d["pairing"]["other"], json!("Laptop"));
     assert_eq!(l["pairing"]["other"], json!("Desk"));
-    desk.call("pair.confirm", json!({"matches": true})).await;
+    // Both sides say yes; nothing moves until they have.
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    until(&desk, 10, "desk waiting for the laptop", |s| {
+        s["pairing"]["stage"] == json!("waiting_other")
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(laptop.status().await["set_up"], json!(false));
+    laptop
+        .call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
     until(&laptop, 20, "laptop to be set up", |s| {
         s["set_up"] == json!(true)
     })
@@ -311,7 +326,8 @@ async fn a_wrong_answer_to_the_number_shares_nothing() {
         s["pairing"]["stage"] == json!("confirm")
     })
     .await;
-    desk.call("pair.confirm", json!({"matches": false})).await;
+    desk.call("pair.confirm", json!({"confirm": true, "matches": false}))
+        .await;
     until(&desk, 10, "cancelled", |s| {
         s["pairing"]["stage"] == json!("cancelled")
     })
@@ -328,7 +344,9 @@ async fn recovery_kit_restores_on_a_new_computer() {
     old.write(".config/kitty/kitty.conf", "font_size 13");
     old.call("setup.start_fresh", json!(null)).await;
     until(&old, 20, "publish", |s| s["counts"]["in_sync"] == json!(1)).await;
-    let kit = old.call("recovery.create", json!(null)).await;
+    let kit = old
+        .call("recovery.create", json!({"confirm": true, "confirm": true}))
+        .await;
     let words = kit["words"].as_str().unwrap();
     assert_eq!(words.split(' ').count(), 6);
 
@@ -648,7 +666,14 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
         s["pairing"]["stage"] == json!("confirm")
     })
     .await;
-    desk.call("pair.confirm", json!({"matches": true})).await;
+    until(&bare, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    bare.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
     let s = until(&bare, 20, "bare to fail", |s| {
         s["pairing"]["stage"] == json!("failed")
     })
@@ -671,7 +696,15 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
         s["pairing"]["stage"] == json!("confirm")
     })
     .await;
-    desk.call("pair.confirm", json!({"matches": true})).await;
+    until(&laptop, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    laptop
+        .call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
     until(&laptop, 20, "laptop set up", |s| s["set_up"] == json!(true)).await;
     assert_eq!(opal.connects(), 2, "the laptop paired with Opal too");
     until(&laptop, 20, "incoming", |s| {
@@ -729,7 +762,10 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
 
     // No recovery kit in Opal mode: Opal's backup is the kit.
     let mut c = Client::open(&laptop.socket).await;
-    let err = c.call("recovery.create", json!(null)).await.unwrap_err();
+    let err = c
+        .call("recovery.create", json!({"confirm": true, "confirm": true}))
+        .await
+        .unwrap_err();
     assert!(err.contains("Opal"), "{err}");
 }
 
@@ -1586,7 +1622,11 @@ async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
         s["pairing"]["stage"] == json!("confirm")
     })
     .await;
-    desk.call("pair.confirm", json!({"matches": true})).await;
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    laptop
+        .call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
     until(&laptop, 20, "laptop set up", |s| s["set_up"] == json!(true)).await;
     let s = desk.status().await;
     assert_eq!(s["identity"]["mode"], json!("local"));
@@ -1596,13 +1636,21 @@ async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
     // Too early: Opal doesn't have the key.
     let mut c = crate::Client::open(&desk.socket).await;
     let e = c
-        .call("identity.move.finish", json!(null))
+        .call(
+            "identity.move.finish",
+            json!({"confirm": true, "confirm": true}),
+        )
         .await
         .unwrap_err();
     assert!(e.contains("doesn't have this key yet"), "{e}");
 
     // The code opens with the words and is this very key.
-    let m = desk.call("identity.move.start", json!(null)).await;
+    let m = desk
+        .call(
+            "identity.move.start",
+            json!({"confirm": true, "confirm": true}),
+        )
+        .await;
     let code = m["code"].as_str().unwrap().to_string();
     let words = m["words"].as_str().unwrap().to_string();
     assert!(
@@ -1624,13 +1672,21 @@ async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
     // Declined pairing: nothing changes, and a retry works.
     opal.set_answer(Answer::Deny);
     let e = c
-        .call("identity.move.finish", json!(null))
+        .call(
+            "identity.move.finish",
+            json!({"confirm": true, "confirm": true}),
+        )
         .await
         .unwrap_err();
     assert!(e.contains("declined"), "{e}");
     assert_eq!(desk.status().await["identity"]["mode"], json!("local"));
     opal.set_answer(Answer::Allow);
-    let r = desk.call("identity.move.finish", json!(null)).await;
+    let r = desk
+        .call(
+            "identity.move.finish",
+            json!({"confirm": true, "confirm": true}),
+        )
+        .await;
     assert_eq!(r["label"], json!("Derek 1"));
     let s = until(&desk, 20, "opal mode", |s| {
         s["identity"]["mode"] == json!("opal")
@@ -1642,16 +1698,25 @@ async fn a_silent_key_moves_into_opal_and_sync_carries_on() {
     assert_eq!(opal.connects(), 1);
     // Calling it again is harmless.
     let e = c
-        .call("identity.move.finish", json!(null))
+        .call(
+            "identity.move.finish",
+            json!({"confirm": true, "confirm": true}),
+        )
         .await
         .unwrap_err();
     assert!(e.contains("already holds"), "{e}");
     let e = c
-        .call("identity.move.start", json!(null))
+        .call(
+            "identity.move.start",
+            json!({"confirm": true, "confirm": true}),
+        )
         .await
         .unwrap_err();
     assert!(e.contains("already holds"), "{e}");
-    let e = c.call("recovery.create", json!(null)).await.unwrap_err();
+    let e = c
+        .call("recovery.create", json!({"confirm": true, "confirm": true}))
+        .await
+        .unwrap_err();
     assert!(e.contains("Opal holds your key"), "{e}");
 
     // Opal signs now, and the laptop (same sync secret) still gets changes.
@@ -1704,4 +1769,151 @@ async fn the_identity_card_names_the_key_and_its_relays() {
     let card = desk.call("identity.card", json!(null)).await;
     assert_eq!(card["has_profile"], json!(true));
     assert_eq!(card["name"], json!("Derek"));
+}
+
+// ── Pairing v2: both sides confirm, one code, one try ────────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_new_computer_can_say_no_and_a_sync_only_pairing_needs_opal() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let desk = Daemon::start(&url, "Desk").await;
+    let laptop = Daemon::start(&url, "Laptop").await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+
+    let code = laptop.call("pair.new", json!(null)).await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    desk.call("pair.join", json!({"code": code})).await;
+    until(&laptop, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    until(&desk, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    // The person at the new computer says No: the desk never sends.
+    laptop
+        .call("pair.confirm", json!({"confirm": true, "matches": false}))
+        .await;
+    until(&laptop, 10, "cancelled", |s| {
+        s["pairing"]["stage"] == json!("cancelled")
+    })
+    .await;
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(laptop.status().await["set_up"], json!(false));
+    assert_eq!(
+        desk.status().await["pairing"]["stage"],
+        json!("waiting_other")
+    );
+    // The same code can't be used again.
+    let mut c = crate::Client::open(&desk.socket).await;
+    desk.call("pair.cancel", json!(null)).await;
+    let e = c
+        .call("pair.join", json!({"code": code}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("already used") || e.contains("wait"), "{e}");
+
+    // A fresh code, but the desk keeps its key to itself: without Opal the
+    // new computer can't sign, and says so.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    laptop.call("pair.cancel", json!(null)).await;
+    let code = laptop.call("pair.new", json!(null)).await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    desk.call("pair.join", json!({"code": code})).await;
+    until(&laptop, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    until(&desk, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    laptop
+        .call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    desk.call(
+        "pair.confirm",
+        json!({"confirm": true, "matches": true, "hold_key": false}),
+    )
+    .await;
+    let s = until(&laptop, 20, "needs Opal", |s| {
+        s["pairing"]["stage"] == json!("failed")
+    })
+    .await;
+    assert!(
+        s["pairing"]["error"].as_str().unwrap().contains("Opal"),
+        "{s}"
+    );
+    assert_eq!(laptop.status().await["set_up"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_computer_with_the_code_aborts_the_pairing() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let desk = Daemon::start(&url, "Desk").await;
+    let intruder = Daemon::start(&url, "Intruder").await;
+    let laptop = Daemon::start(&url, "Laptop").await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    intruder.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+    until(&intruder, 20, "set up", |s| s["set_up"] == json!(true)).await;
+
+    let code = laptop.call("pair.new", json!(null)).await["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    desk.call("pair.join", json!({"code": code})).await;
+    until(&laptop, 20, "number", |s| {
+        s["pairing"]["stage"] == json!("confirm")
+    })
+    .await;
+    // Someone who saw the code joins too: the new computer stops, visibly.
+    intruder.call("pair.join", json!({"code": code})).await;
+    let s = until(&laptop, 20, "aborted", |s| {
+        s["pairing"]["stage"] == json!("aborted")
+    })
+    .await;
+    assert!(
+        s["pairing"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("another computer"),
+        "{s}"
+    );
+    // Nothing can be shared any more, whatever the desk answers.
+    desk.call("pair.confirm", json!({"confirm": true, "matches": true}))
+        .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(laptop.status().await["set_up"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pairing_attempts_are_rate_limited() {
+    let relay = mock_relay().await;
+    let url = relay.url().await.to_string();
+    let desk = Daemon::start(&url, "Desk").await;
+    desk.call("setup.start_fresh", json!(null)).await;
+    until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+    let mut c = crate::Client::open(&desk.socket).await;
+    for _ in 0..5 {
+        let code = peridot_sync::pairing::Code::generate().display();
+        c.call("pair.join", json!({"code": code})).await.unwrap();
+        c.call("pair.cancel", json!(null)).await.unwrap();
+    }
+    let code = peridot_sync::pairing::Code::generate().display();
+    let e = c
+        .call("pair.join", json!({"code": code}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("too many"), "{e}");
 }

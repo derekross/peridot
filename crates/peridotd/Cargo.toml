@@ -14,6 +14,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
+libc = "0.2"
 nostr-sdk.workspace = true
 notify = "8"
 opal-core.workspace = true

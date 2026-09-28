@@ -33,6 +33,7 @@ pub struct Options {
     pub home: PathBuf,
     pub data_dir: PathBuf,
     pub opal_socket: PathBuf,
+    pub trust: crate::authz::Trust,
 }
 
 pub struct App {
@@ -54,6 +55,11 @@ pub struct App {
     pub runner: Mutex<Option<JoinHandle<()>>>,
     pub gallery_runner: Mutex<Option<JoinHandle<()>>>,
     pub pairing: Mutex<Option<PairSession>>,
+    pub pair_limits: Mutex<crate::pair::PairLimiter>,
+    /// Who may ask for what on the socket.
+    pub trust: crate::authz::Trust,
+    pub limits: crate::authz::Limits,
+    pub approvals: crate::approvals::Approvals,
     /// Wakes the runner for an immediate sync.
     pub nudge: Notify,
     pub last_sync: AtomicU64,
@@ -84,6 +90,10 @@ impl App {
             runner: Mutex::new(None),
             gallery_runner: Mutex::new(None),
             pairing: Mutex::new(None),
+            pair_limits: Mutex::new(Default::default()),
+            trust: o.trust,
+            limits: Default::default(),
+            approvals: Default::default(),
             nudge: Notify::new(),
             last_sync: AtomicU64::new(0),
             last_error: RwLock::new(None),
@@ -353,7 +363,14 @@ impl App {
     /// Everything the panel shows.
     pub async fn snapshot(&self) -> Value {
         let cfg = self.config.read().await.clone();
-        let pairing = self.pairing.lock().await.as_ref().map(|p| p.view());
+        // The pairing code is the one secret in here: only `pair.view`
+        // (the panel and the command) gets it, never every listener.
+        let pairing = self.pairing.lock().await.as_ref().map(|p| {
+            let mut v = p.view();
+            v.code = None;
+            v.qr = None;
+            v
+        });
         let base = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "device_name": cfg.device_name(),
@@ -361,6 +378,7 @@ impl App {
             "paused": cfg.paused,
             "relays": cfg.relays,
             "pairing": pairing,
+            "approvals": self.approvals.list(),
             "error": *self.last_error.read().await,
         });
         let opal = self.opal.view();

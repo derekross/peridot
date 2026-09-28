@@ -2,6 +2,8 @@
 
 mod api;
 mod app;
+mod approvals;
+mod authz;
 mod config;
 mod contacts;
 mod gallery;
@@ -46,6 +48,12 @@ struct Args {
     /// Opal's control socket (development only).
     #[arg(long, hide = true)]
     opal_socket: Option<PathBuf>,
+    /// Treat this executable as the panel (development only; tests).
+    #[arg(long, hide = true)]
+    panel_exe: Vec<PathBuf>,
+    /// Treat this executable as the `peridot` command (development only).
+    #[arg(long, hide = true)]
+    cli_exe: Vec<PathBuf>,
 }
 
 #[tokio::main]
@@ -103,6 +111,7 @@ async fn main() -> Result<()> {
         opal_socket: args
             .opal_socket
             .unwrap_or_else(|| AppDirs::OPAL.socket_path()),
+        trust: authz::Trust::new(&args.panel_exe, &args.cli_exe),
     });
     // Say so plainly if the sandbox breaks file access, instead of every
     // file quietly showing as unreadable.

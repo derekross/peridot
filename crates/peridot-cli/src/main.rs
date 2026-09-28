@@ -52,10 +52,15 @@ enum Cmd {
         cmd: OpalCmd,
     },
     /// Pair a new computer. Run on the new one; then run
-    /// `peridot pair <code>` on a computer you already use.
+    /// `peridot pair <code>` on a computer you already use. Both sides
+    /// compare a number and say yes.
     Pair {
         /// The code shown on the new computer.
         code: Option<String>,
+        /// Don't hand the identity's key to the new computer. It then
+        /// needs Opal with this identity to sync.
+        #[arg(long)]
+        sync_only: bool,
     },
     /// Apply incoming settings (all, or just these paths).
     Apply {
@@ -1078,22 +1083,34 @@ async fn run() -> Result<()> {
                 }
             }
         }
-        Cmd::Pair { code: None } => {
+        Cmd::Pair {
+            code: None,
+            sync_only: _,
+        } => {
             c.call("subscribe", json!(null)).await?;
             let v = c.call("pair.new", json!(null)).await?;
             println!("On a computer that already uses Peridot, run:\n");
             println!("    peridot pair {}\n", v["code"].as_str().unwrap_or(""));
             println!(
-                "(or choose \"Pair a new computer\" in its panel). The code works for 5 minutes."
+                "(or choose \"Pair a new computer\" in its panel). The code works for 5 minutes, once."
             );
+            let mut answered = false;
             loop {
                 let p = c.next_pairing().await?;
                 match p["stage"].as_str().unwrap_or("") {
-                    "confirm" => println!(
-                        "\nCheck that {} shows this number: {}",
-                        p["other"].as_str().unwrap_or("the other computer"),
-                        p["number"].as_str().unwrap_or("")
-                    ),
+                    "confirm" if !answered => {
+                        answered = true;
+                        let ok = yes(&format!(
+                            "\nDoes {} show the number {}?",
+                            p["other"].as_str().unwrap_or("the other computer"),
+                            p["number"].as_str().unwrap_or("")
+                        ))?;
+                        c.call("pair.confirm", json!({"matches": ok})).await?;
+                        if !ok {
+                            bail!("pairing cancelled; nothing was shared");
+                        }
+                        println!("Waiting for the other computer to confirm too…");
+                    }
                     "done" => {
                         println!(
                             "\nPaired. Your settings are arriving; review them with `peridot status`."
@@ -1101,28 +1118,41 @@ async fn run() -> Result<()> {
                         break;
                     }
                     "expired" => bail!("the code expired; run `peridot pair` again"),
-                    "failed" => bail!("{}", p["error"].as_str().unwrap_or("pairing failed")),
+                    "aborted" | "failed" => {
+                        bail!("{}", p["error"].as_str().unwrap_or("pairing failed"))
+                    }
                     _ => {}
                 }
             }
         }
-        Cmd::Pair { code: Some(code) } => {
+        Cmd::Pair {
+            code: Some(code),
+            sync_only,
+        } => {
+            let hold_key = !sync_only;
             c.call("subscribe", json!(null)).await?;
             c.call("pair.join", json!({"code": code})).await?;
             println!("Waiting for the new computer…");
+            let mut answered = false;
             loop {
                 let p = c.next_pairing().await?;
                 match p["stage"].as_str().unwrap_or("") {
-                    "confirm" => {
+                    "confirm" if !answered => {
+                        answered = true;
                         let ok = yes(&format!(
                             "Does {} show the number {}?",
                             p["other"].as_str().unwrap_or("the new computer"),
                             p["number"].as_str().unwrap_or("")
                         ))?;
-                        c.call("pair.confirm", json!({"matches": ok})).await?;
+                        if sync_only && p["can_hold_key"] != json!(true) {
+                            println!("(This computer doesn't hold the key anyway.)");
+                        }
+                        c.call("pair.confirm", json!({"matches": ok, "hold_key": hold_key}))
+                            .await?;
                         if !ok {
                             bail!("pairing cancelled; nothing was shared");
                         }
+                        println!("Waiting for the new computer to confirm too…");
                     }
                     "done" => {
                         println!("Paired.");
@@ -1131,7 +1161,9 @@ async fn run() -> Result<()> {
                     "expired" => {
                         bail!("the new computer didn't answer; check the code and try again")
                     }
-                    "failed" => bail!("{}", p["error"].as_str().unwrap_or("pairing failed")),
+                    "aborted" | "failed" => {
+                        bail!("{}", p["error"].as_str().unwrap_or("pairing failed"))
+                    }
                     "cancelled" => bail!("pairing cancelled"),
                     _ => {}
                 }
