@@ -544,7 +544,7 @@ mod tests {
     fn expiration(ev: &Event) -> u64 {
         ev.tags
             .iter()
-            .find(|t| t.kind().to_string() == "expiration")
+            .find(|t| t.kind() == "expiration")
             .and_then(|t| t.content())
             .and_then(|v| v.parse().ok())
             .unwrap()

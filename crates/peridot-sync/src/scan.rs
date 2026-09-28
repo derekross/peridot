@@ -180,7 +180,7 @@ mod tests {
         );
         put(
             ".config/hypr/looknfeel.lua",
-            b"-- api_key = abcdefghijklmnop",
+            b"-- api_key = a1b2c3d4e5f6g7h8",
         );
         assert!(matches!(
             read_checked(&home, ".config/hypr/looknfeel.lua")
