@@ -162,6 +162,9 @@ async fn mock_relay() -> MockRelay {
 
 /// Poll until `check` passes (or fail after `secs`).
 async fn until(d: &Daemon, secs: u64, what: &str, check: impl Fn(&Value) -> bool) -> Value {
+    // The whole suite runs at once, twenty-odd daemons on one machine:
+    // a wait that is generous alone is tight then.
+    let secs = secs.max(45);
     for _ in 0..secs * 5 {
         let s = d.status().await;
         if check(&s) {

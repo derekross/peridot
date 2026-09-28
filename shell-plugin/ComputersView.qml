@@ -77,7 +77,7 @@ Column {
     color: root.urgent
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
-    text: "Removing hides it from your list. It keeps what it already has; to stop it syncing, choose \"Stop syncing here\" on that computer."
+    text: "Your other computers move to a new sync key this one never receives, so it stops getting your settings. What it already has stays there."
   }
 
   PanelSectionHeader { text: "PAIR A NEW COMPUTER"; foreground: root.dim }
