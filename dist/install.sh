@@ -72,6 +72,10 @@ for arg in "$@"; do
   esac
 done
 [[ $MODE == auto ]] && { command -v cargo >/dev/null && MODE=--build || MODE=--prebuilt; }
+# peridot-dbus-proxy.service runs /usr/bin/xdg-dbus-proxy (from the package
+# of the same name; on Omarchy it's usually there as a dependency, not always).
+command -v xdg-dbus-proxy >/dev/null \
+  || { echo "Peridot needs xdg-dbus-proxy (it filters the daemon's view of the session bus): sudo pacman -S --needed xdg-dbus-proxy" >&2; exit 1; }
 if [[ -n ${PERIDOT_RELEASE_CHECKSUMS:-} ]]; then
   if (( DEV )); then
     RELEASE_CHECKSUMS="$PERIDOT_RELEASE_CHECKSUMS"

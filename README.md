@@ -51,6 +51,7 @@ Report a problem as described in [SECURITY.md](SECURITY.md).
 - Omarchy (the Quattro shell with plugins) on Arch
 - A Secret Service provider: gnome-keyring (Omarchy's default)
 - Already on Omarchy: `systemd`, `curl`, `jq`
+- `xdg-dbus-proxy` (`sudo pacman -S --needed xdg-dbus-proxy`): it filters the daemon's view of the session bus. The installer stops and says so if it's missing.
 - Optional: Rust, to build it yourself (`sudo pacman -S --needed rustup && rustup default stable`). Without it, the installer downloads release binaries (x86_64 and aarch64), checked against the release's checksums.
 
 ## Install

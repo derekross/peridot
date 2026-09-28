@@ -73,12 +73,18 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             Ok(Some(root))
                 if peridot_sync::identity::Identity::root_commitment(&root).is_some() =>
             {
-                app.set_error(Some(
-                    "Your other computers moved to a newer Peridot. Pair this computer again to keep syncing."
-                        .into(),
-                ))
-                .await;
-                app.emit_state().await;
+                // Back to the welcome screen: pairing is how this computer
+                // gets the new secret, and it's only offered there.
+                app.handover("stopping: pair again", |app| async move {
+                    app.stop_engine().await;
+                    app.set_error(Some(
+                        "Your other computers moved to a newer Peridot. Choose \"Add this computer\" and enter the code on one of them to keep syncing; your settings here stay as they are."
+                            .into(),
+                    ))
+                    .await;
+                    app.emit_state().await;
+                    Ok(())
+                });
                 return Ok(());
             }
             Ok(_) => {
