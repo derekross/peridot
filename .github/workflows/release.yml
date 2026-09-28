@@ -5,8 +5,10 @@
 #
 # The tag must match the version in manifest.json and Cargo.toml.
 # Builds run on Ubuntu 22.04 (glibc 2.35) so the binaries also run on
-# older systems than Arch. No build cache: release binaries are built from
-# a clean checkout every time.
+# older systems than Arch, with the Rust toolchain pinned to one version
+# (bump it here and in ci.yml together). No build cache: release binaries
+# are built from a clean checkout every time. Every action is pinned to a
+# commit; the comment names the tag it was taken from.
 name: Release
 
 on:
@@ -46,9 +48,16 @@ jobs:
           # uses to recognise its own files later.
           ./dist/gen-known-hashes.sh --check
 
+      - name: No agent scaffolding or transcripts in the tree
+        # AGENTS.md, CLAUDE.md, .claude/, .cursor/, .aider* and *.jsonl
+        # transcripts are local working files; a release must not carry them.
+        run: |
+          bad="$(git ls-files -z | tr '\0' '\n' | grep -E '(^|/)(AGENTS\.md|CLAUDE\.md|\.aider[^/]*)$|(^|/)(\.claude|\.cursor)/|\.jsonl$' || true)"
+          if [[ -n $bad ]]; then printf 'tracked files that must not be:\n%s\n' "$bad"; exit 1; fi
+
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
-          toolchain: stable
+          toolchain: 1.98.1
 
       - name: Test
         run: cargo test --locked --workspace
