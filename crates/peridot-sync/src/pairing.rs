@@ -346,9 +346,15 @@ enum JoinerState {
         replied_at: u64,
     },
     /// The number is on screen; waiting for the person here.
-    ShowNumber { sponsor: PublicKey, session: Session },
+    ShowNumber {
+        sponsor: PublicKey,
+        session: Session,
+    },
     /// The person here confirmed; waiting for the transfer.
-    Confirmed { sponsor: PublicKey, session: Session },
+    Confirmed {
+        sponsor: PublicKey,
+        session: Session,
+    },
     /// Over, one way or another.
     Ended,
 }
@@ -456,7 +462,9 @@ impl Joiner {
         }
         match &self.state {
             JoinerState::Waiting => {
-                let Ok(Message::Hello { name, commit, mac, .. }) = receive(&self.meeting, ev)
+                let Ok(Message::Hello {
+                    name, commit, mac, ..
+                }) = receive(&self.meeting, ev)
                 else {
                     return Err(self.bad_message());
                 };
@@ -598,7 +606,8 @@ impl Joiner {
                 let secret = SyncSecret::from_hex(&open(&wrap)?).map_err(|_| PairError::Invalid)?;
                 let keys = match key_wrap {
                     Some(kw) => {
-                        let keys = Keys::parse(open(&kw)?.as_str()).map_err(|_| PairError::Invalid)?;
+                        let keys =
+                            Keys::parse(open(&kw)?.as_str()).map_err(|_| PairError::Invalid)?;
                         if keys.public_key() != pubkey {
                             return Err(PairError::Invalid);
                         }
@@ -697,7 +706,10 @@ enum SponsorState {
         user_confirmed: Option<Handover>,
         joiner_confirmed: bool,
     },
-    Sent { joiner: PublicKey, session: Session },
+    Sent {
+        joiner: PublicKey,
+        session: Session,
+    },
     Ended,
 }
 
@@ -808,8 +820,7 @@ impl Sponsor {
                 else {
                     return Err(self.bad_message());
                 };
-                let (Ok(device_pk), Ok(n_e)) = (PublicKey::from_hex(&device), hex32(&nonce))
-                else {
+                let (Ok(device_pk), Ok(n_e)) = (PublicKey::from_hex(&device), hex32(&nonce)) else {
                     return Err(self.bad_message());
                 };
                 let Ok(k0) = self
@@ -940,7 +951,7 @@ impl Sponsor {
         }
         *user_confirmed = Some(Handover {
             pubkey: identity.pubkey,
-            secret: identity.secret.to_hex().into(),
+            secret: identity.secret.to_hex(),
             key: identity
                 .keys
                 .as_ref()
@@ -970,8 +981,13 @@ impl Sponsor {
             unreachable!()
         };
         let me = self.me.as_ref().ok_or(PairError::Unexpected)?;
-        let wrap = nip44::encrypt(me.secret_key(), &device, h.secret.as_str(), nip44::Version::V2)
-            .map_err(|_| PairError::Invalid)?;
+        let wrap = nip44::encrypt(
+            me.secret_key(),
+            &device,
+            h.secret.as_str(),
+            nip44::Version::V2,
+        )
+        .map_err(|_| PairError::Invalid)?;
         let key_wrap = match &h.key {
             Some(k) => Some(
                 nip44::encrypt(me.secret_key(), &device, k.as_str(), nip44::Version::V2)
@@ -1152,7 +1168,10 @@ mod tests {
         let (_, hello1) = Sponsor::start(&code, "Desk", 0).unwrap();
         let (_, hello2) = Sponsor::start(&code, "Desk", 0).unwrap();
         assert!(matches!(j.handle(&hello1, 1), Ok(JoinerStep::Reply { .. })));
-        assert_eq!(j.handle(&hello2, 2).err(), Some(PairError::Aborted(ANOTHER)));
+        assert_eq!(
+            j.handle(&hello2, 2).err(),
+            Some(PairError::Aborted(ANOTHER))
+        );
         // And the code is dead.
         assert_eq!(j.handle(&hello1, 3).err(), Some(PairError::Unexpected));
     }
@@ -1180,7 +1199,10 @@ mod tests {
         let JoinerStep::Reply { reply: reply2 } = j2.handle(&hello, 1).unwrap() else {
             panic!()
         };
-        assert_eq!(s.handle(&reply2, 2).err(), Some(PairError::Aborted(ANOTHER)));
+        assert_eq!(
+            s.handle(&reply2, 2).err(),
+            Some(PairError::Aborted(ANOTHER))
+        );
     }
 
     #[test]
@@ -1254,7 +1276,10 @@ mod tests {
         let transfer = s.confirm(true, &id, false).unwrap().unwrap();
         // Tampering with the wrap breaks the MAC.
         let Message::Transfer {
-            pubkey, key_wrap, mac, ..
+            pubkey,
+            key_wrap,
+            mac,
+            ..
         } = receive(j.me.as_ref().unwrap(), &transfer).unwrap()
         else {
             panic!()

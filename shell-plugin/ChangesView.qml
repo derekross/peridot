@@ -200,7 +200,7 @@ Column {
             tooltipText: modelData.kind === "theme" ? "Switch" : "Install"
             onClicked: {
               root.svc.message(modelData.kind === "theme" ? "Switching theme…" : "Installing…", false)
-              root.svc.run("offer.accept", modelData, function() { root.svc.message("Done", false) })
+              root.svc.run("offer.accept", Object.assign({ confirm: true }, modelData), function() { root.svc.message("Done", false) })
             }
           }
           PanelActionButton {

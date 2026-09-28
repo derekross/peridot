@@ -101,6 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_addresses_are_refused_before_any_request() {
+        opal_core::identity::ensure_crypto_provider();
         let http = reqwest::Client::new();
         for who in [
             "derek@localhost",
