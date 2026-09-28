@@ -73,11 +73,15 @@ done
 [[ -n $omarchy ]] || die "Omarchy isn't installed here (no bin/ under /usr/share/omarchy or ~/.local/share/omarchy)"
 env+=(OMARCHY_PATH="$omarchy" PATH="$omarchy/bin:/usr/local/bin:/usr/bin:/bin")
 
+# A plugin is code, so Omarchy's command wants a confirmation. It has one:
+# Peridot installs a setup one step at a time and each plugin is confirmed
+# in the panel by name and repository before this unit starts. There is no
+# terminal here for Omarchy to ask on, so that confirmation is passed on.
+extra=()
 case $kind in
   theme) cmd=omarchy-theme-install ;;
-  # No --yes: a plugin is code, and Omarchy's own confirmation stands.
-  plugin) cmd=omarchy-plugin-add ;;
+  plugin) cmd=omarchy-plugin-add; extra=(--yes) ;;
   theme-set) cmd=omarchy-theme-set ;;
 esac
 [[ -x $omarchy/bin/$cmd ]] || die "$cmd isn't in $omarchy/bin"
-exec /usr/bin/env -i "${env[@]}" "$omarchy/bin/$cmd" "$arg"
+exec /usr/bin/env -i "${env[@]}" "$omarchy/bin/$cmd" "$arg" "${extra[@]}"

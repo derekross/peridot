@@ -104,9 +104,9 @@ expect "session variables kept" grep -qx "WAYLAND_DISPLAY=wayland-1" "$HOME/env.
 expect "identity kept" grep -qx "HOME=$HOME" "$HOME/env.log" && grep -qx "USER=tester" "$HOME/env.log" && grep -qx "OMARCHY_PATH=$HOME/.local/share/omarchy" "$HOME/env.log" &&
 expect "nothing else" [ "$(grep -cvE '^(HOME|USER|LOGNAME|XDG_RUNTIME_DIR|TERM|LANG|DBUS_SESSION_BUS_ADDRESS|WAYLAND_DISPLAY|DISPLAY|HYPRLAND_INSTANCE_SIGNATURE|OMARCHY_PATH|PATH|PWD|SHLVL|_)=' "$HOME/env.log")" = 0 ] && ok
 
-case_ "8. a plugin runs omarchy-plugin-add without --yes; a theme name runs omarchy-theme-set; the command's exit status is the script's"
+case_ "8. a plugin runs omarchy-plugin-add --yes (confirmed in the panel already; no terminal here); a theme name runs omarchy-theme-set; the command's exit status is the script's"
 fresh2; fake_omarchy; r=$(run_script "plugin:$(b64url https://gitlab.com/acme/omarchy-weather)")
-expect "exit 0" [ "$r" = 0 ] && expect "plugin-add, no --yes" ran "omarchy-plugin-add https://gitlab.com/acme/omarchy-weather" && not ran -- "--yes" && ok
+expect "exit 0" [ "$r" = 0 ] && expect "plugin-add --yes" ran "omarchy-plugin-add https://gitlab.com/acme/omarchy-weather --yes" && ok
 r=$(run_script "theme-set:$(b64url tokyo-night)")
 expect "exit 0" [ "$r" = 0 ] && expect "theme-set" ran "omarchy-theme-set tokyo-night" && ok
 echo 7 >"$HOME/rc"; r=$(run_script "theme-set:$(b64url tokyo-night)")
