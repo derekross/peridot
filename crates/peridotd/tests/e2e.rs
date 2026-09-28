@@ -666,12 +666,17 @@ async fn an_opal_identity_syncs_and_pairs_only_with_opal_present() {
     desk.call("setup.use_opal", json!({})).await;
     // Settings sync regardless (the epoch's own key signs them); only the
     // root event, which the identity signs, waits for the unlock.
-    let s = until(&desk, 20, "desk waiting for unlock, settings published", |s| {
-        s["error"]
-            .as_str()
-            .is_some_and(|e| e.contains("Unlock Opal"))
-            && s["counts"]["in_sync"] == json!(1)
-    })
+    let s = until(
+        &desk,
+        20,
+        "desk waiting for unlock, settings published",
+        |s| {
+            s["error"]
+                .as_str()
+                .is_some_and(|e| e.contains("Unlock Opal"))
+                && s["counts"]["in_sync"] == json!(1)
+        },
+    )
     .await;
     assert_eq!(s["set_up"], json!(true));
     assert_eq!(opal.connects(), 1, "paired once during setup");

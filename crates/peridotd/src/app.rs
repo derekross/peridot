@@ -342,8 +342,31 @@ impl App {
             &(Timestamp::now().as_secs() + WINDOW).to_string(),
         )?;
         self.db.set_kv("peridot.republish_pending", "1")?;
+        // The root event names the new epoch; a restart before it went
+        // out must still publish it.
+        self.db.set_kv("peridot.root_pending", "1")?;
         self.start_engine(identity, true).await?;
         Ok(epoch)
+    }
+
+    /// Run an engine transition from a task of its own. The runner must
+    /// not start or stop engines itself: `stop_engine` aborts the runner's
+    /// task, which would be the caller, and the transition would die
+    /// half-way with the engine gone and nothing said.
+    pub fn handover<F, Fut>(self: &Arc<Self>, what: &'static str, f: F)
+    where
+        F: FnOnce(Arc<Self>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+    {
+        let app = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = f(app.clone()).await {
+                tracing::warn!("{what} failed: {e:#}");
+                app.set_error(Some(format!("Sync stopped ({what}): {e}")))
+                    .await;
+                app.emit_state().await;
+            }
+        });
     }
 
     /// Another computer rotated and handed us the new secret.

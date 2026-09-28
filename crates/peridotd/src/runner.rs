@@ -43,7 +43,7 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
     // Setup publishes that need the signer (the root event for a new
     // identity, this device's entry). With Opal locked or not running yet
     // they wait and are retried, rather than stopping sync.
-    let mut root_pending = fresh;
+    let mut root_pending = fresh || app.db.get_kv("peridot.root_pending")?.as_deref() == Some("1");
     let mut announced = false;
     if fresh {
         engine.mark_caught_up();
@@ -83,8 +83,11 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
             }
             Ok(_) => {
                 tracing::info!("moving to epoch 1");
-                app.rotate(&[]).await?;
-                // The new engine has taken over.
+                // Not from here: starting the new engine stops this one,
+                // and this task is the one being stopped.
+                app.handover("moving to epoch 1", |app| async move {
+                    app.rotate(&[]).await.map(|_| ())
+                });
                 return Ok(());
             }
             Err(e) => {
@@ -250,15 +253,17 @@ async fn rotated(app: &Arc<App>, engine: &Arc<SyncEngine>) -> bool {
     match engine.take_pending_rotation() {
         None => false,
         Some(Rotation::Adopt { secret, .. }) => {
-            match app.adopt_epoch(secret).await {
-                Ok(()) => {}
-                Err(e) => tracing::warn!("couldn't move to the new epoch: {e}"),
-            }
+            app.handover("moving to the new epoch", |app| async move {
+                app.adopt_epoch(secret).await
+            });
             true
         }
         Some(Rotation::Removed { epoch }) => {
             tracing::warn!("this computer was left out of epoch {epoch}");
-            app.removed_elsewhere().await;
+            app.handover("stopping after removal", |app| async move {
+                app.removed_elsewhere().await;
+                Ok(())
+            });
             true
         }
     }
@@ -299,7 +304,10 @@ async fn setup_publishes(
 ) {
     if *root_pending {
         match engine.publish_root().await {
-            Ok(()) => *root_pending = false,
+            Ok(()) => {
+                *root_pending = false;
+                let _ = app.db.set_kv("peridot.root_pending", "0");
+            }
             Err(e) => {
                 app.set_error(Some(format!("{e} (finishing setup)"))).await;
                 return;
