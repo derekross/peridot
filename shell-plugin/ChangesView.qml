@@ -200,7 +200,13 @@ Column {
             tooltipText: modelData.kind === "theme" ? "Switch" : "Install"
             onClicked: {
               root.svc.message(modelData.kind === "theme" ? "Switching theme…" : "Installing…", false)
-              root.svc.run("offer.accept", Object.assign({ confirm: true }, modelData), function() { root.svc.message("Done", false) })
+              var consent = modelData.kind === "theme" ? "theme-set:" + modelData.name
+                          : modelData.kind === "install_theme" ? "theme:" + modelData.url
+                          : "plugin:" + modelData.url
+              root.svc.consent(consent, function(ok) {
+                if (!ok) return
+                root.svc.run("offer.accept", Object.assign({ confirm: true }, modelData), function() { root.svc.message("Done", false) })
+              })
             }
           }
           PanelActionButton {

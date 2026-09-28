@@ -45,7 +45,7 @@ print_paths
 # anything else.
 for p in "${!MANIFEST_HASH[@]}"; do
   case $p in
-    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$INSTALLER" | "$UNIT" | "$PROXY_UNIT" | "$INSTALL_UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
+    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$INSTALLER" | "$UNIT" | "$PROXY_UNIT" | "$SOCKET_UNIT" | "$INSTALL_UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
     *) note "ignoring a record line for $p: not a path this script writes"; unset 'MANIFEST_HASH[$p]' ;;
   esac
 done
@@ -96,6 +96,26 @@ case $PROXY_UNIT_STATE in
   symlink) note "$PROXY_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
   foreign) note "$PROXY_UNIT isn't Peridot's; leaving it alone." ;;
   other) note "$PROXY_UNIT isn't a regular file; leaving it alone." ;;
+  missing) ;;
+esac
+
+# The install socket and its instances: stopped (so nothing new starts,
+# and nothing running stays) before the units go.
+inspect_socket_unit
+case $SOCKET_UNIT_STATE in
+  owned)
+    systemctl_user stop peridot-install.socket
+    systemctl_user stop 'peridot-install@*.service'
+    remove_owned "$SOCKET_UNIT" "$(file_hash "$SOCKET_UNIT")"
+    systemctl_user daemon-reload ;;
+  edited)
+    systemctl_user stop peridot-install.socket
+    systemctl_user stop 'peridot-install@*.service'
+    note "$SOCKET_UNIT is kept: you changed it. It starts the script this removes; remove it yourself when you're done with it." ;;
+  elsewhere) note "peridot-install.socket comes from $SOCKET_UNIT_FRAGMENT; not Peridot's, leaving it alone." ;;
+  symlink) note "$SOCKET_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
+  foreign) note "$SOCKET_UNIT isn't Peridot's; leaving it alone." ;;
+  other) note "$SOCKET_UNIT isn't a regular file; leaving it alone." ;;
   missing) ;;
 esac
 

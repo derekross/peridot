@@ -65,9 +65,10 @@ pub async fn dispatch_gated(
                 bail!("only the panel answers approvals");
             }
             let summary = crate::authz::describe(method, &params);
-            let (pending, rx) = app
-                .approvals
-                .open(method, summary.clone(), caller.name(), now);
+            let consent = install_consent(method, &params);
+            let (pending, rx) =
+                app.approvals
+                    .open(method, summary.clone(), caller.name(), now, consent);
             app.emit("approval", json!(pending));
             app.emit_state().await;
             crate::notify::approval_needed(&summary);
@@ -1315,16 +1316,68 @@ fn offer_from(params: Value) -> Result<Offer> {
     Ok(offer)
 }
 
-/// Run an Omarchy command in your session (outside the daemon's sandbox)
-/// with fixed arguments, and wait for it.
+/// The consent text an install needs: what the panel records before it
+/// asks, and what the install helper looks for. One spelling, the same
+/// one `run_omarchy` sends, so the two can't drift apart.
+pub fn consent_text(program: &str, arg: &str) -> Option<String> {
+    let kind = match program {
+        "omarchy-theme-install" => "theme",
+        "omarchy-plugin-add" => "plugin",
+        "omarchy-theme-set" => "theme-set",
+        _ => return None,
+    };
+    Some(format!("{kind}:{arg}"))
+}
+
+/// For a dangerous method that installs something: the consent text the
+/// panel must record when it allows the request (None for anything else,
+/// or for a request that couldn't install anything anyway).
+pub fn install_consent(method: &str, params: &Value) -> Option<String> {
+    let canon = |u: &str| peridot_sync::gallery::canonical_url(u).filter(|u| valid_source(u));
+    match method {
+        "gallery.install" => {
+            let url = canon(params["url"].as_str()?)?;
+            match params["kind"].as_str()? {
+                "theme" => consent_text("omarchy-theme-install", &url),
+                "plugin" => consent_text("omarchy-plugin-add", &url),
+                _ => None,
+            }
+        }
+        "gallery.setup.install" => {
+            let step = &params["step"];
+            match step["kind"].as_str()? {
+                "install_theme" => {
+                    consent_text("omarchy-theme-install", &canon(step["url"].as_str()?)?)
+                }
+                "install_plugin" => {
+                    consent_text("omarchy-plugin-add", &canon(step["url"].as_str()?)?)
+                }
+                "switch_theme" => {
+                    let name = step["name"].as_str()?;
+                    valid_name(name).then(|| consent_text("omarchy-theme-set", name))?
+                }
+                _ => None,
+            }
+        }
+        "offer.accept" => match offer_from(params.clone()).ok()? {
+            Offer::Theme { name, .. } => consent_text("omarchy-theme-set", &name),
+            Offer::InstallTheme { url, .. } => consent_text("omarchy-theme-install", &url),
+            Offer::InstallPlugin { url, .. } => consent_text("omarchy-plugin-add", &url),
+        },
+        _ => None,
+    }
+}
+
+/// Run one of Omarchy's installers, outside this process's sandbox: one
+/// line to peridot-install.socket (`<kind>:<base64url argument>`), which
+/// starts an instance of peridot-install@.service for the connection; the
+/// script decodes it, checks it again, requires the consent record the
+/// panel wrote for exactly this install, runs the matching Omarchy command
+/// with an environment of its own, and answers `ok` or `error: …`.
+/// Nothing else from this process reaches it.
 async fn run_omarchy(program: &str, args: &[&str]) -> Result<()> {
-    use base64::Engine;
-    // Installs run outside this sandbox as an instance of
-    // peridot-install@.service (dist/), a template whose fixed ExecStart is
-    // ~/.local/bin/peridot-install. The only thing that crosses over is the
-    // instance name, <kind>:<base64url argument>; the script decodes it,
-    // checks it again and runs the matching Omarchy command with an
-    // environment of its own. Nothing from this process reaches it.
+    use base64::Engine as _;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
     let (kind, arg) = match (program, args) {
         ("omarchy-theme-install", [url]) => ("theme", *url),
         ("omarchy-plugin-add", [url]) => ("plugin", *url),
@@ -1332,51 +1385,43 @@ async fn run_omarchy(program: &str, args: &[&str]) -> Result<()> {
         _ => bail!("{program}: not something Peridot runs"),
     };
     let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(arg.as_bytes());
-    let unit = format!("peridot-install@{kind}:{encoded}.service");
-    // Unit names are capped at 255 bytes; repository addresses are far shorter.
     anyhow::ensure!(
-        unit.len() <= 255,
+        encoded.len() <= 400,
         "{program}: that address is too long to install"
     );
-    let mut cmd = tokio::process::Command::new("systemctl");
-    cmd.args(["--user", "--quiet", "start", "--wait", &unit])
-        .stdin(std::process::Stdio::null());
+    let runtime = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/self".into());
+    let path = std::path::Path::new(&runtime).join("peridot-install.sock");
+    let stream = tokio::net::UnixStream::connect(&path).await.map_err(|e| {
+        anyhow::anyhow!(
+            "can't reach Peridot's installer ({}: {e}); is peridot-install.socket running?",
+            path.display()
+        )
+    })?;
+    let (rd, mut wr) = stream.into_split();
+    wr.write_all(format!("{kind}:{encoded}\n").as_bytes())
+        .await?;
+    wr.shutdown().await?;
     // The unit stops itself after RuntimeMaxSec=300; this only guards
-    // against systemctl not coming back.
-    let out = tokio::time::timeout(Duration::from_secs(330), cmd.output()).await??;
-    if out.status.success() {
+    // against the answer not coming back.
+    let mut line = String::new();
+    let n = tokio::time::timeout(
+        Duration::from_secs(330),
+        tokio::io::BufReader::new(rd)
+            .take(4096)
+            .read_line(&mut line),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("{program}: the install didn't finish in time"))??;
+    anyhow::ensure!(n > 0, "{program}: the installer closed without answering");
+    let line = line.trim();
+    if line == "ok" {
         return Ok(());
     }
-    // The command's own last words, from the journal (its output goes
-    // there, not to us): only what the unit's processes printed.
-    let mut log = tokio::process::Command::new("journalctl");
-    log.args([
-        "--user",
-        "--quiet",
-        "--no-pager",
-        "--output=cat",
-        "--lines=1",
-        "--since=-10min",
-        "--unit",
-        &unit,
-        "_TRANSPORT=stdout",
-    ])
-    .stdin(std::process::Stdio::null());
-    let why = match tokio::time::timeout(Duration::from_secs(10), log.output()).await {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .last()
-            .unwrap_or("")
-            .trim()
-            .to_string(),
-        _ => String::new(),
-    };
+    let why = line.strip_prefix("error:").map(str::trim).unwrap_or(line);
     if why.is_empty() {
-        let status = String::from_utf8_lossy(&out.stderr);
-        let status = status.lines().next().unwrap_or("it failed").trim();
-        bail!("{program}: {status}");
+        bail!("{program} failed")
     }
-    bail!("{program}: {why}");
+    bail!("{program}: {why}")
 }
 
 /// Start using `pubkey` on this computer. If it already has settings on the
@@ -1523,6 +1568,62 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn the_consent_text_is_the_command_that_runs() {
+        use super::install_consent;
+        assert_eq!(
+            install_consent(
+                "gallery.install",
+                &json!({"url": "https://GitHub.com/Acme/Omarchy-Weather.git", "kind": "plugin"})
+            )
+            .as_deref(),
+            Some("plugin:https://github.com/acme/omarchy-weather")
+        );
+        assert_eq!(
+            install_consent(
+                "gallery.setup.install",
+                &json!({"coordinate": "x", "step": {"kind": "switch_theme", "name": "tokyo-night"}})
+            )
+            .as_deref(),
+            Some("theme-set:tokyo-night")
+        );
+        assert_eq!(
+            install_consent(
+                "gallery.setup.install",
+                &json!({"coordinate": "x", "step": {"kind": "install_theme", "url": "https://codeberg.org/a/b"}})
+            )
+            .as_deref(),
+            Some("theme:https://codeberg.org/a/b")
+        );
+        assert_eq!(
+            install_consent(
+                "offer.accept",
+                &json!({"kind": "install_plugin", "name": "acme.weather", "url": "https://gitlab.com/acme/omarchy-weather"})
+            )
+            .as_deref(),
+            Some("plugin:https://gitlab.com/acme/omarchy-weather")
+        );
+        // Not an install, or not somewhere Peridot installs from: nothing
+        // to consent to (and the method itself refuses it).
+        assert_eq!(install_consent("recovery.create", &json!(null)), None);
+        assert_eq!(
+            install_consent(
+                "gallery.install",
+                &json!({"url": "https://evil.example/a/b", "kind": "plugin"})
+            ),
+            None
+        );
+        assert_eq!(
+            install_consent(
+                "gallery.setup.install",
+                &json!({"step": {"kind": "switch_theme", "name": "../x"}})
+            ),
+            None
+        );
+    }
+
     #[test]
     fn formats_dates() {
         assert_eq!(super::ymd(0), "1970-01-01");

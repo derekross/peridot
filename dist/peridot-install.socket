@@ -1,0 +1,19 @@
+# Installed by Peridot (https://github.com/derekross/peridot); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
+#
+# Where Peridot's daemon asks for an Omarchy install. The daemon's sandbox
+# can't run Omarchy's installers and has no way to ask systemd for anything;
+# it writes one line to this socket instead, and systemd starts an instance
+# of peridot-install@.service for that connection, outside the sandbox. The
+# instance runs only what you confirmed in Peridot's panel (the panel leaves
+# a consent record the daemon can't write; see ~/.local/bin/peridot-install).
+[Unit]
+Description=Peridot: where the daemon asks for an Omarchy install
+Documentation=https://github.com/derekross/peridot
+
+[Socket]
+ListenStream=%t/peridot-install.sock
+SocketMode=0600
+Accept=yes
+MaxConnections=2
+RemoveOnStop=yes

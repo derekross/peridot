@@ -232,6 +232,17 @@ Item {
               font.pixelSize: Style.font.caption
               text: "Only allow it if you just ran that command yourself."
             }
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              wrapMode: Text.Wrap
+              visible: !!modelData.consent
+              color: root.foreground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              // What allowing records as your consent: exactly what runs.
+              text: "Runs: " + (modelData.consent || "")
+            }
             Row {
               spacing: Style.space(8)
               Button {
@@ -239,7 +250,11 @@ Item {
                 iconText: "󰄬"
                 bordered: true
                 foreground: root.foreground
-                onClicked: root.svc.run("approvals.answer", { id: modelData.id, ok: true, confirm: true })
+                onClicked: {
+                  var answer = function() { root.svc.run("approvals.answer", { id: modelData.id, ok: true, confirm: true }) }
+                  if (modelData.consent) root.svc.consent(modelData.consent, function(ok) { if (ok) answer() })
+                  else answer()
+                }
               }
               Button {
                 text: "Refuse"

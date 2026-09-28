@@ -11,6 +11,9 @@ After=graphical-session.target
 # goes away this service stops with it and is started again with it.
 BindsTo=peridot-dbus-proxy.service
 After=peridot-dbus-proxy.service
+# Installs are asked for over this socket (see peridot-install.socket).
+Wants=peridot-install.socket
+After=peridot-install.socket
 
 [Service]
 Type=simple
@@ -23,12 +26,12 @@ RestartSec=3
 # except for the places Peridot writes: the settings it syncs (under
 # ~/.config, plus ~/.XCompose and ~/.bashrc if you sync them), its own data,
 # its socket, and your Documents folder for the recovery kit. It needs the
-# network, and the session bus for the keyring, notifications and asking
-# systemd to run an install; it gets the bus through peridot-dbus-proxy,
-# which lets exactly those through, and the real bus and systemd's own
-# socket are hidden from it, so even code that took this process over
-# couldn't define a unit of its own. Installing a theme or plugin you
-# accepted runs as peridot-install@.service, outside this sandbox.
+# network, and the session bus for the keyring and notifications; it gets
+# the bus through peridot-dbus-proxy, which lets exactly those through, and
+# the real bus and systemd's own socket are hidden from it, so it can't ask
+# systemd for anything. Installing a theme or plugin you confirmed is asked
+# for over peridot-install.socket and runs as peridot-install@.service,
+# outside this sandbox, only with the panel's own consent record.
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes

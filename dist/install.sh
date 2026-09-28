@@ -187,6 +187,15 @@ case $PROXY_UNIT_STATE in
   foreign) stop "$PROXY_UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
 esac
 
+inspect_socket_unit
+SOCKET_UNIT_HASH="$(file_hash "$SOCKET_UNIT")"
+case $SOCKET_UNIT_STATE in
+  elsewhere) stop "peridot-install.socket is already provided by $SOCKET_UNIT_FRAGMENT; installing Peridot's would shadow it. Remove or rename that unit first." ;;
+  symlink) stop "$SOCKET_UNIT is a symbolic link (masked or linked). Peridot won't replace it; unmask or unlink it, then run this again." ;;
+  other) stop "$SOCKET_UNIT exists and isn't a regular file. Move it aside, then run this again." ;;
+  foreign) stop "$SOCKET_UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
+esac
+
 inspect_menu
 
 PLUGIN_STATE="$(plugin_dir_state "$PLUGIN_PATH")"
@@ -273,6 +282,19 @@ case $PROXY_UNIT_STATE in
   edited)
     say "Keeping your $PROXY_UNIT (you changed it; Peridot's version isn't installed)" ;;
 esac
+# The socket the daemon asks for installs on: a change to it (where it
+# listens) only takes once the socket is restarted, so that is remembered.
+SOCKET_WRITTEN=0
+case $SOCKET_UNIT_STATE in
+  missing)
+    say "Installing the install socket unit"
+    replace_owned "dist/peridot-install.socket" "$SOCKET_UNIT" 644 "" && AUX_UNITS_WRITTEN=1 SOCKET_WRITTEN=1 ;;
+  owned)
+    say "Updating the install socket unit"
+    replace_owned "dist/peridot-install.socket" "$SOCKET_UNIT" 644 "$SOCKET_UNIT_HASH" && AUX_UNITS_WRITTEN=1 SOCKET_WRITTEN=1 ;;
+  edited)
+    say "Keeping your $SOCKET_UNIT (you changed it; Peridot's version isn't installed)" ;;
+esac
 case $INSTALL_UNIT_STATE in
   missing)
     say "Installing the install template unit"
@@ -318,6 +340,10 @@ case $UNIT_STATE in
     fi ;;
   *) (( AUX_UNITS_WRITTEN )) && systemctl_user daemon-reload ;;
 esac
+# peridot.service wants the socket, so it is up whenever the service is;
+# a rewritten socket unit listens where the new file says only once
+# restarted.
+(( SOCKET_WRITTEN )) && systemctl_user restart peridot-install.socket
 
 case $MENU_STATE in
   present) say "Share menu: the Private link entries are already in $MENU" ;;

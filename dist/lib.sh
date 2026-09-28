@@ -35,6 +35,7 @@ UNITDIR="$CONFIG_HOME/systemd/user"            # systemd honours XDG_CONFIG_HOME
 UNIT="$UNITDIR/peridot.service"
 INSTALL_UNIT="$UNITDIR/peridot-install@.service"   # runs Omarchy installs outside the daemon's sandbox
 PROXY_UNIT="$UNITDIR/peridot-dbus-proxy.service"   # the session bus, filtered, for peridotd (it is bound to this)
+SOCKET_UNIT="$UNITDIR/peridot-install.socket"      # where the daemon asks for an install; each connection starts an instance of INSTALL_UNIT
 INSTALLER="$BINDIR/peridot-install"                # what that template unit runs
 PLUGINDIR="$HOME/.config/omarchy/plugins"      # where Omarchy itself looks
 MENU="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"   # Omarchy's, not XDG
@@ -151,6 +152,7 @@ load_known() {
   KNOWN["$(file_hash dist/peridot.service)"$'\t'unit]=checkout
   KNOWN["$(file_hash dist/peridot-install@.service)"$'\t'install-unit]=checkout
   KNOWN["$(file_hash dist/peridot-dbus-proxy.service)"$'\t'proxy-unit]=checkout
+  KNOWN["$(file_hash dist/peridot-install.socket)"$'\t'install-socket]=checkout
   KNOWN["$(file_hash dist/peridot-install)"$'\t'bin/peridot-install]=checkout
   while IFS= read -r -d '' f; do
     [[ ${f#shell-plugin/} == manifest.json ]] && continue
@@ -492,6 +494,12 @@ inspect_proxy_unit() {
   aux_unit_state "$PROXY_UNIT" peridot-dbus-proxy.service proxy-unit
   PROXY_UNIT_STATE=$AUX_STATE PROXY_UNIT_FRAGMENT=$AUX_FRAGMENT
 }
+# The socket (peridot-install.socket) the daemon asks for installs on.
+SOCKET_UNIT_STATE=missing SOCKET_UNIT_FRAGMENT=
+inspect_socket_unit() {
+  aux_unit_state "$SOCKET_UNIT" peridot-install.socket install-socket
+  SOCKET_UNIT_STATE=$AUX_STATE SOCKET_UNIT_FRAGMENT=$AUX_FRAGMENT
+}
 
 # binary_state <path>: missing | symlink | other | owned | unrecorded
 binary_state() {
@@ -743,7 +751,8 @@ PINNED_COMMIT=
 print_paths() {
   say "Paths:"
   note "binaries  $BINDIR/peridotd, $BINDIR/peridot, $INSTALLER"
-  note "services  $UNIT, $PROXY_UNIT, $INSTALL_UNIT"
+  note "services  $UNIT, $PROXY_UNIT (its bus)"
+  note "installs  $SOCKET_UNIT, $INSTALL_UNIT (one per request; runs $INSTALLER)"
   note "plugin    $PLUGIN_PATH"
   note "menu      $MENU"
   note "record    $MANIFEST$( [[ -f $MANIFEST ]] || printf ' (none yet)')"

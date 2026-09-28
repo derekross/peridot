@@ -3,52 +3,96 @@
 # ~/.local/bin/peridot-install; install.sh and uninstall.sh only replace or
 # remove this file while it is exactly what they wrote.
 #
-# Runs one Omarchy install on Peridot's behalf, outside the daemon's sandbox:
+# Runs one Omarchy install on Peridot's behalf, outside the daemon's
+# sandbox, and only one you confirmed in Peridot's panel.
 #
-#   peridot-install theme:<base64url of an https address>   omarchy-theme-install <address>
-#   peridot-install plugin:<base64url of an https address>  omarchy-plugin-add <address>
-#   peridot-install theme-set:<base64url of a theme name>   omarchy-theme-set <name>
+# How it is reached: the daemon writes one line to peridot-install.socket
+# (%t/peridot-install.sock) and systemd starts an instance of
+# peridot-install@.service for that connection, with this script on the
+# socket. The line is the request:
 #
-# The daemon (peridotd) never runs this itself: it asks systemd to start
-# peridot-install@<argument>.service, a template unit whose fixed ExecStart
-# is this script, so the only thing that crosses from the daemon to your
-# session is that one argument. It is checked again here, on the same terms
-# the daemon uses (an https address on github.com, gitlab.com or
-# codeberg.org; a theme name as Omarchy spells them), and the Omarchy
-# command runs with a small, fixed environment built from what systemd
-# knows about you: nothing the daemon has, or could set, reaches it.
+#   theme:<base64url of an https address>      omarchy-theme-install <address>
+#   plugin:<base64url of an https address>     omarchy-plugin-add <address> --yes
+#   theme-set:<base64url of a theme name>      omarchy-theme-set <name>
+#
+# The reply is one line, "ok" or "error: <why>", and the exit status is 0
+# or the Omarchy command's. The command's own output goes to the journal;
+# on failure its last line is the reply's <why>.
+#
+# What is checked before anything runs: the request is decoded and held to
+# the same terms the daemon uses (an https address on github.com,
+# gitlab.com or codeberg.org; a theme name as Omarchy spells them), and the
+# panel's consent record for exactly that request must be there and fresh:
+# ${XDG_STATE_HOME:-~/.local/state}/peridot/consent/<sha256 of
+# "<kind>:<argument>">, a file of yours nobody else can read, holding that
+# text and the time it was written, at most ten minutes ago. The daemon
+# can't write there (that folder is read-only to it), so the record proves
+# the panel, not the daemon, asked. It is used once: removed before the
+# command runs.
+#
+# The Omarchy command runs with a small, fixed environment built from what
+# systemd knows about you: nothing the daemon has, or could set, reaches it.
 set -euo pipefail
 
-die() { printf 'peridot-install: %s\n' "$*" >&2; exit 2; }
+# The one line back on the socket (stdout); everything else goes to the
+# journal (stderr).
+reply() { printf '%s\n' "$1"; }
+refuse() { printf 'peridot-install: %s\n' "$2" >&2; reply "error: $1"; exit 2; }
+bad_request() { refuse "not an install request" "$1"; }
 
-[[ $# -eq 1 ]] || die "usage: peridot-install <theme|plugin|theme-set>:<base64url argument>"
-[[ $1 =~ ^(theme|plugin|theme-set):([A-Za-z0-9_-]{1,400})$ ]] || die "not an install request: ${1:0:40}"
+# ── The request: one line, at most 512 bytes ─────────────────────────────
+line=
+if ! IFS= read -r -t 30 -n 512 line; then
+  [[ -n $line ]] || bad_request "no request line"
+fi
+[[ $line =~ ^(theme|plugin|theme-set):([A-Za-z0-9_-]{1,400})$ ]] || bad_request "not <kind>:<base64url>: ${line:0:40}"
 kind=${BASH_REMATCH[1]} encoded=${BASH_REMATCH[2]}
 
 # base64url without padding: back to the standard alphabet, padded, decoded.
 pad=$(( (4 - ${#encoded} % 4) % 4 ))
-(( pad != 3 )) || die "not an install request: bad encoding"
+(( pad != 3 )) || bad_request "bad encoding"
 arg="$(printf '%s%s' "$(printf '%s' "$encoded" | tr -- '-_' '+/')" "$(printf '%*s' "$pad" '' | tr ' ' '=')" | base64 -d 2>/dev/null)" \
-  || die "not an install request: bad encoding"
+  || bad_request "bad encoding"
 
 case $kind in
   theme | plugin)
-    (( ${#arg} < 300 )) || die "that address is too long"
+    (( ${#arg} < 300 )) || bad_request "that address is too long"
     [[ $arg =~ ^https://(github\.com|gitlab\.com|codeberg\.org)/[A-Za-z0-9._~/:%+-]+$ ]] \
-      || die "not an address Peridot installs from: ${arg:0:80}"
-    [[ $arg != *//* || ${arg#https://} != *//* ]] || die "not an address Peridot installs from: ${arg:0:80}"
+      || bad_request "not an address Peridot installs from: ${arg:0:80}"
+    [[ $arg != *//* || ${arg#https://} != *//* ]] || bad_request "not an address Peridot installs from: ${arg:0:80}"
     ;;
   theme-set)
-    [[ $arg =~ ^[a-z0-9-]{1,64}$ ]] || die "not a theme name: ${arg:0:40}"
+    [[ $arg =~ ^[a-z0-9-]{1,64}$ ]] || bad_request "not a theme name: ${arg:0:40}"
     ;;
 esac
 
-# The environment the Omarchy command gets. HOME, USER and XDG_RUNTIME_DIR
-# are set by the unit from systemd's own record of you (%h, %u, %t); the
-# display and bus variables are taken from the session only in the shapes
-# they can have. Nothing else is passed on.
-[[ ${HOME:-} == /* ]] || die "HOME isn't set"
+# ── Your consent, from the panel ─────────────────────────────────────────
+[[ ${HOME:-} == /* ]] || refuse "HOME isn't set" "HOME isn't set"
 uid="$(id -u)"
+not_confirmed() { refuse "not confirmed in Peridot's panel ($1)" "consent: $1"; }
+state="${XDG_STATE_HOME:-$HOME/.local/state}"
+[[ $state == /* ]] || state="$HOME/.local/state"
+text="$kind:$arg"
+record="$state/peridot/consent/$(printf '%s' "$text" | sha256sum | cut -d' ' -f1)"
+if [[ -L $record || ( -e $record && ! -f $record ) ]]; then not_confirmed "the record isn't a plain file"; fi
+[[ -f $record ]] || not_confirmed "no record"
+owner_mode="$(stat -c '%u %a' -- "$record" 2>/dev/null || true)"
+[[ ${owner_mode%% *} == "$uid" ]] || not_confirmed "the record isn't yours"
+(( 8#${owner_mode##* } & 077 )) && not_confirmed "the record is readable by others"
+recorded= when=
+{ IFS= read -r recorded || true; IFS= read -r when || true; } <"$record"
+[[ $recorded == "$text" ]] || not_confirmed "the record is for something else"
+[[ $when =~ ^[0-9]{1,12}$ ]] || not_confirmed "the record has no time"
+now="$(date +%s)"
+(( now - when <= 600 )) || not_confirmed "the confirmation is more than ten minutes old"
+(( when - now <= 60 )) || not_confirmed "the record's time is in the future"
+# Used once: gone before anything runs.
+rm -- "$record" 2>/dev/null || not_confirmed "the record was already used"
+
+# ── The environment the Omarchy command gets ─────────────────────────────
+# HOME, USER and XDG_RUNTIME_DIR are set by the unit from systemd's own
+# record of you (%h, %u, %t); the display and bus variables are taken from
+# the session only in the shapes they can have. Nothing else is passed on.
 user="${USER:-$(id -un)}"
 runtime="${XDG_RUNTIME_DIR:-/run/user/$uid}"
 [[ $runtime == /* ]] || runtime="/run/user/$uid"
@@ -70,18 +114,34 @@ for candidate in "${OMARCHY_PATH:-}" /usr/share/omarchy "$HOME/.local/share/omar
   [[ -d $candidate/bin ]] || continue
   omarchy=$candidate; break
 done
-[[ -n $omarchy ]] || die "Omarchy isn't installed here (no bin/ under /usr/share/omarchy or ~/.local/share/omarchy)"
+[[ -n $omarchy ]] || refuse "Omarchy isn't installed here" "no bin/ under /usr/share/omarchy or ~/.local/share/omarchy"
 env+=(OMARCHY_PATH="$omarchy" PATH="$omarchy/bin:/usr/local/bin:/usr/bin:/bin")
 
 # A plugin is code, so Omarchy's command wants a confirmation. It has one:
-# Peridot installs a setup one step at a time and each plugin is confirmed
-# in the panel by name and repository before this unit starts. There is no
-# terminal here for Omarchy to ask on, so that confirmation is passed on.
+# the consent record checked above is the panel's, given for this plugin
+# by name and repository. There is no terminal here for Omarchy to ask on,
+# so that confirmation is passed on.
 extra=()
 case $kind in
   theme) cmd=omarchy-theme-install ;;
   plugin) cmd=omarchy-plugin-add; extra=(--yes) ;;
   theme-set) cmd=omarchy-theme-set ;;
 esac
-[[ -x $omarchy/bin/$cmd ]] || die "$cmd isn't in $omarchy/bin"
-exec /usr/bin/env -i "${env[@]}" "$omarchy/bin/$cmd" "$arg" "${extra[@]}"
+[[ -x $omarchy/bin/$cmd ]] || refuse "$cmd isn't in $omarchy/bin" "$cmd isn't in $omarchy/bin"
+
+# ── Run it ───────────────────────────────────────────────────────────────
+# Its output goes to the journal as it comes, and is kept for the reply.
+log="$(mktemp)"
+trap 'rm -f -- "$log"' EXIT
+if /usr/bin/env -i "${env[@]}" "$omarchy/bin/$cmd" "$arg" "${extra[@]}" </dev/null 2>&1 | tee -- "$log" >&2; then
+  rc=0
+else
+  rc=${PIPESTATUS[0]}
+fi
+if (( rc == 0 )); then
+  reply ok
+  exit 0
+fi
+why="$(grep -v '^[[:space:]]*$' -- "$log" | tail -n 1 | tr -d '\r\000' | cut -c1-300)"
+reply "error: ${why:-$cmd exited with status $rc}"
+exit "$rc"

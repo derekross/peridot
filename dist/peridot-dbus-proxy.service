@@ -11,22 +11,15 @@ Wants=peridot.service
 [Service]
 Type=simple
 # A second socket in front of the real bus. peridotd sees only this one:
-# the keyring, desktop notifications, and of systemd exactly what
-# `systemctl start --wait peridot-install@…` needs (StartUnit, GetUnit,
-# a reference on the unit, the JobRemoved signal). It can't define a unit
-# of its own (StartTransientUnit), stop or change one, or talk to anything
-# else on the bus.
+# the keyring and desktop notifications, nothing else. Installs don't go
+# over the bus at all (peridot-install.socket), so it has no business with
+# systemd: it can't start, define, stop or change a unit.
 RuntimeDirectory=peridot
 RuntimeDirectoryMode=0700
 ExecStart=/usr/bin/xdg-dbus-proxy ${DBUS_SESSION_BUS_ADDRESS} %t/peridot/bus \
   --filter \
   --talk=org.freedesktop.secrets \
-  --talk=org.freedesktop.Notifications \
-  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.StartUnit@/org/freedesktop/systemd1 \
-  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.GetUnit@/org/freedesktop/systemd1 \
-  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Unit.Ref@/org/freedesktop/systemd1/unit/* \
-  --call=org.freedesktop.systemd1=org.freedesktop.systemd1.Unit.Unref@/org/freedesktop/systemd1/unit/* \
-  --broadcast=org.freedesktop.systemd1=org.freedesktop.systemd1.Manager.JobRemoved@/org/freedesktop/systemd1
+  --talk=org.freedesktop.Notifications
 # "Started" only once the socket is there, so peridot.service (After=) can
 # rely on it.
 ExecStartPost=/usr/bin/sh -c 'for i in $(seq 100); do [ -S %t/peridot/bus ] && exit 0; sleep 0.05; done; exit 1'

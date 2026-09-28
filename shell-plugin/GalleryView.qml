@@ -182,11 +182,14 @@ Column {
     if (busyUrl !== "") return
     busyUrl = item.url
     svc.message("Installing " + item.name + "…", false)
-    svc.call("gallery.install", { url: item.url, kind: item.kind, confirm: true }, function(err) {
-      root.busyUrl = ""
-      if (err) { root.svc.message(err, true); return }
-      root.svc.message("Installed " + item.name, false)
-      root.reload(true)
+    svc.consent(item.kind + ":" + item.url, function(ok) {
+      if (!ok) { root.busyUrl = ""; return }
+      svc.call("gallery.install", { url: item.url, kind: item.kind, confirm: true }, function(err) {
+        root.busyUrl = ""
+        if (err) { root.svc.message(err, true); return }
+        root.svc.message("Installed " + item.name, false)
+        root.reload(true)
+      })
     })
   }
 
@@ -238,9 +241,15 @@ Column {
     var step = steps[i]
     var what = step.url || step.name || ""
     root.svc.message("Step " + (i + 1) + " of " + steps.length + ": " + what + "…", false)
-    svc.call("gallery.setup.install", { coordinate: s.coordinate, step: step, confirm: true }, function(err) {
-      if (err) { root.svc.message(err, true); failed++ }
-      root.runSteps(s, steps, i + 1, failed)
+    var consent = step.kind === "install_theme" ? "theme:" + step.url
+                : step.kind === "install_plugin" ? "plugin:" + step.url
+                : "theme-set:" + step.name
+    svc.consent(consent, function(ok) {
+      if (!ok) { root.runSteps(s, steps, i + 1, failed + 1); return }
+      svc.call("gallery.setup.install", { coordinate: s.coordinate, step: step, confirm: true }, function(err) {
+        if (err) { root.svc.message(err, true); failed++ }
+        root.runSteps(s, steps, i + 1, failed)
+      })
     })
   }
 

@@ -80,6 +80,39 @@ Item {
     onStarted: { write(root._clip); root._clip = ""; stdinEnabled = false }
   }
 
+  // Your consent to an install, recorded by this panel (not the daemon,
+  // which can't write there) before the daemon is asked: one file per
+  // install under ~/.local/state/peridot/consent, named by the SHA-256 of
+  // its text, holding the text and the time. The install helper outside
+  // the daemon's sandbox runs nothing without one, and uses it up.
+  property var _consents: []
+  property var _consentCb: null
+  Process {
+    id: consentProc
+    onExited: function(code) {
+      var cb = root._consentCb; root._consentCb = null
+      if (cb) cb(code === 0)
+      root._nextConsent()
+    }
+  }
+  function _nextConsent() {
+    if (consentProc.running || _consents.length === 0) return
+    var job = _consents.shift()
+    _consentCb = job.cb
+    var dir = (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/peridot/consent"
+    consentProc.command = ["/usr/bin/sh", "-c",
+      'umask 077 && /usr/bin/mkdir -p "$1" && h=$(/usr/bin/printf %s "$2" | /usr/bin/sha256sum | /usr/bin/cut -c1-64) && /usr/bin/printf "%s\n%s\n" "$2" "$(/usr/bin/date +%s)" > "$1/$h"',
+      "sh", dir, job.text]
+    consentProc.running = true
+  }
+  function consent(text, cb) {
+    _consents.push({ text: text, cb: function(ok) {
+      if (!ok) root.message("Couldn't record your consent (see the journal)", true)
+      cb(ok)
+    } })
+    _nextConsent()
+  }
+
   function copy(text, what) {
     root._clip = text
     if (clipProc.running) clipProc.signal(15)

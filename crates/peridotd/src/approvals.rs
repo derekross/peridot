@@ -24,6 +24,10 @@ pub struct Pending {
     /// Who asked.
     pub from: &'static str,
     pub expires_at: u64,
+    /// For an install: the exact text the panel records as your consent
+    /// (`theme:<address>`, `plugin:<address>` or `theme-set:<name>`),
+    /// which the install helper requires before it runs anything.
+    pub consent: Option<String>,
 }
 
 struct Waiting {
@@ -51,6 +55,7 @@ impl Approvals {
         summary: String,
         from: &'static str,
         now: u64,
+        consent: Option<String>,
     ) -> (Pending, oneshot::Receiver<bool>) {
         let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.next_id += 1;
@@ -60,6 +65,7 @@ impl Approvals {
             summary,
             from,
             expires_at: now + APPROVAL_TIMEOUT.as_secs(),
+            consent,
         };
         let (tx, rx) = oneshot::channel();
         g.waiting.insert(
@@ -111,6 +117,7 @@ mod tests {
             "stop syncing".into(),
             "the peridot command",
             10,
+            None,
         );
         assert_eq!(a.list().len(), 1);
         assert_eq!(p.expires_at, 130);
@@ -118,7 +125,7 @@ mod tests {
         assert_eq!(rx.await, Ok(true));
         assert!(!a.answer(p.id, true), "gone once answered");
         assert!(a.list().is_empty());
-        let (p2, rx2) = a.open("x", "y".into(), "the peridot command", 10);
+        let (p2, rx2) = a.open("x", "y".into(), "the peridot command", 10, None);
         a.forget(p2.id);
         assert!(rx2.await.is_err(), "a forgotten request is refused");
     }

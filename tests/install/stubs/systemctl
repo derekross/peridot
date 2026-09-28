@@ -6,6 +6,7 @@ case "$2" in
     case "$*" in
       *peridot-install@*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_INSTALL_FRAGMENT:-}" ;;
       *peridot-dbus-proxy*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_PROXY_FRAGMENT:-}" ;;
+      *peridot-install.socket*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_SOCKET_FRAGMENT:-}" ;;
       *) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_FRAGMENT:-}" "${FAKE_EXECSTART:-}" ;;
     esac ;;
   status) echo "* opal.service - fake" ;;

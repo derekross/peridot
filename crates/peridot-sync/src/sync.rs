@@ -1381,10 +1381,15 @@ impl SyncEngine {
         {
             let have = installed("themes");
             for t in themes.into_iter().filter(|t| !have.contains(&t.name)) {
-                if valid_name(&t.name) && valid_source(&t.url) {
+                // One spelling of the address: the one the panel consents
+                // to must be the one that runs.
+                if valid_name(&t.name)
+                    && let Some(url) = crate::gallery::canonical_url(&t.url)
+                    && valid_source(&url)
+                {
                     offers.push(Offer::InstallTheme {
                         name: t.name,
-                        url: t.url,
+                        url,
                         from: name_of(&device),
                     });
                 }
@@ -1395,10 +1400,13 @@ impl SyncEngine {
         {
             let have = installed("plugins");
             for p in plugins.into_iter().filter(|p| !have.contains(&p.name)) {
-                if valid_plugin_id(&p.name) && valid_source(&p.url) {
+                if valid_plugin_id(&p.name)
+                    && let Some(url) = crate::gallery::canonical_url(&p.url)
+                    && valid_source(&url)
+                {
                     offers.push(Offer::InstallPlugin {
                         name: p.name,
-                        url: p.url,
+                        url,
                         from: name_of(&device),
                     });
                 }

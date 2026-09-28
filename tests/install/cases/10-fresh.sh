@@ -12,7 +12,7 @@ expect "manifest verifies" manifest_verifies &&
 expect "manifest lists unit" manifest_lists "$U" &&
 expect "manifest lists plugin manifest" manifest_lists "$P/manifest.json" &&
 expect "enable --now once" [ "$(grep -c 'enable --now' "$FAKE_LOG")" = 1 ] &&
-expect "no restart" not_logged "restart" &&
+expect "no restart" not_logged "restart peridot.service" &&
 expect "plugin enable" logged "plugin enable derekross.peridot" &&
 expect "menu not touched without consent" [ ! -e "$MENU" ] && said "Share menu: not touched" && ok
 
@@ -21,7 +21,7 @@ r=$(inst)
 expect "exit 0" [ "$r" = 0 ] &&
 expect "nothing kept" not said "keeping" &&
 expect "no enable" [ "$(grep -c 'enable --now' "$FAKE_LOG")" = 1 ] &&
-expect "no restart when not running" not_logged "restart" &&
+expect "no restart when not running" not_logged "restart peridot.service" &&
 expect "no plugin enable again" [ "$(grep -c 'plugin enable' "$FAKE_LOG")" = 1 ] &&
 expect "manifest verifies" manifest_verifies && ok
 
@@ -30,7 +30,7 @@ FAKE_ACTIVE_RC=0 FAKE_EXECSTART="{ path=$BIN/peridotd ; argv[]=$BIN/peridotd }" 
 expect "restart" logged "restart peridot.service" && ok
 : >"$FAKE_LOG"
 FAKE_ACTIVE_RC=0 FAKE_EXECSTART="{ path=/opt/peridotd ; argv[]=/opt/peridotd }" r=$(inst)
-expect "not restarted" not_logged "restart" &&
+expect "not restarted" not_logged "restart peridot.service" &&
 expect "told" said "restart it yourself" && ok
 
 case_ "4. a stop in the checks leaves nothing behind"
