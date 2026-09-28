@@ -171,6 +171,89 @@ async fn edits_flow_between_computers_and_can_be_undone() {
 }
 
 #[tokio::test]
+async fn backups_are_private_and_applied_files_are_never_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let relay = mock_relay().await;
+    let url = relay.url().await;
+    let id = Identity::generate();
+    let desk = Computer::new(&id, &url, "Desk").await;
+    let laptop = Computer::new(&id, &url, "Laptop").await;
+
+    desk.write(BINDINGS, b"bind = SUPER, Return, exec, kitty");
+    desk.engine.publish_changes().await.unwrap();
+    // The laptop's copy is world-readable and executable (a stray chmod).
+    laptop.write(BINDINGS, b"-- laptop default");
+    let local = laptop.home.path().join(BINDINGS);
+    std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o777)).unwrap();
+    laptop.sync().await;
+    let applied = laptop.engine.apply(&[]).await.unwrap();
+    assert_eq!(applied.applied, [BINDINGS]);
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+    assert_eq!(mode(&local), 0o644, "the exec bit doesn't survive an apply");
+
+    let backups = laptop._data.path().join("backups");
+    let stamps: Vec<_> = std::fs::read_dir(&backups).unwrap().flatten().collect();
+    assert_eq!(stamps.len(), 1);
+    let stamp = stamps[0].path();
+    assert_eq!(mode(&stamp), 0o700, "the backup folder is owner-only");
+    let saved = stamp.join(BINDINGS);
+    assert_eq!(std::fs::read(&saved).unwrap(), b"-- laptop default");
+    assert_eq!(mode(&saved), 0o600, "backups are private");
+
+    // Undo reads the backup back through the same safe path.
+    laptop
+        .engine
+        .undo(applied.history_id.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(laptop.read(BINDINGS).unwrap(), b"-- laptop default");
+    assert_eq!(mode(&local), 0o644);
+}
+
+#[tokio::test]
+async fn an_event_from_the_far_future_is_refused() {
+    let relay = mock_relay().await;
+    let url = relay.url().await;
+    let id = Identity::generate();
+    let desk = Computer::new(&id, &url, "Desk").await;
+    let keys = id.keys.clone().unwrap();
+    let engine_keys = id.secret.keys();
+    let since_before = desk.engine.store.since();
+
+    let event_at = |path: &str, at: u64| {
+        // A small file: one sealed item, the entry itself.
+        let entry = peridot_sync::envelope::pack_file(
+            &engine_keys,
+            path,
+            b"bind = SUPER, Q, killactive",
+            None,
+            "far-away-device",
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        let unsigned = EventBuilder::new(Kind::Custom(peridot_sync::DATA_KIND), entry.content)
+            .tag(Tag::identifier(entry.d))
+            .custom_created_at(Timestamp::from(at))
+            .finalize_unsigned(keys.public_key());
+        keys.sign_event(unsigned).unwrap()
+    };
+    let now = Timestamp::now().as_secs();
+    let ahead = event_at(BINDINGS, now + peridot_sync::sync::MAX_CLOCK_AHEAD + 60);
+    assert!(!desk.engine.ingest(&ahead), "dated too far ahead");
+    assert!(desk.engine.store.remote(BINDINGS).unwrap().is_none());
+    assert_eq!(
+        desk.engine.store.since(),
+        since_before,
+        "the catch-up point doesn't move into the future"
+    );
+    // A small clock difference is fine.
+    let soon = event_at(BINDINGS, now + 60);
+    assert!(desk.engine.ingest(&soon));
+    assert_eq!(desk.status(BINDINGS).await, Some(FileStatus::Incoming));
+}
+
+#[tokio::test]
 async fn concurrent_edits_become_a_conflict_and_either_side_can_win() {
     let relay = mock_relay().await;
     let url = relay.url().await;

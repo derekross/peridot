@@ -22,7 +22,11 @@ Column {
   readonly property var offers: svc ? svc.offers : []
   readonly property var history: svc ? svc.history : []
   readonly property int inSync: svc && svc.counts ? (svc.counts.in_sync || 0) : 0
-  readonly property bool anyCommands: incoming.some(function(f) { return f.runs_commands })
+  // Rows something here would run (a shell, Hyprland, an editor…) are
+  // applied one by one, after you've looked; "Apply all" leaves them out.
+  readonly property var safeIncoming: incoming.filter(function(f) { return !f.runs_commands })
+  readonly property int forReview: incoming.length - safeIncoming.length
+  readonly property bool anyCommands: forReview > 0
 
   // ── Nothing waiting ─────────────────────────────────────────────
   Text {
@@ -65,19 +69,37 @@ Column {
     color: root.urgent
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
-    text: "Some of these can run commands on this computer. Apply them only if you made the change yourself."
+    text: (root.forReview === 1 ? "One of these can run commands" : root.forReview + " of these can run commands")
+      + " on this computer. Apply them one at a time, only if you made the change yourself."
   }
   Row {
-    visible: root.incoming.length > 1
+    visible: root.incoming.length > 1 && root.safeIncoming.length > 0
     spacing: Style.space(8)
     Button {
-      text: "Apply all " + root.incoming.length
+      text: root.forReview > 0
+        ? "Apply " + root.safeIncoming.length + " of " + root.incoming.length
+        : "Apply all " + root.incoming.length
       iconText: "󰄬"
       bordered: true
       foreground: root.foreground
-      onClicked: root.svc.run("apply", { paths: [] }, function(r) {
-        root.svc.message("Applied " + ((r && r.applied) ? r.applied.length : 0) + ". Undo below if needed.", false)
-      })
+      onClicked: {
+        var left = root.forReview
+        root.svc.run("apply", { paths: root.safeIncoming.map(function(f) { return f.path }) }, function(r) {
+          var n = (r && r.applied) ? r.applied.length : 0
+          root.svc.message("Applied " + n + "."
+            + (left > 0 ? " " + left + " left for you to review (can run commands)." : "")
+            + " Undo below if needed.", false)
+        })
+      }
+    }
+    Text {
+      visible: root.forReview > 0
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      color: root.dim
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
+      text: root.forReview + " left for you to review"
     }
   }
 

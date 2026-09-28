@@ -39,6 +39,10 @@ pub const REFRESH_AFTER: u64 = 30 * 86_400;
 pub const CHUNK_GRACE: u64 = 7 * 86_400;
 /// At most this many chunks in one deletion request.
 const DELETE_BATCH: usize = 100;
+/// Events dated further ahead than this are refused: a far-future date
+/// would sit on top of every later change (and push the catch-up point
+/// past them).
+pub const MAX_CLOCK_AHEAD: u64 = 600;
 
 pub struct SyncParams {
     pub identity: Identity,
@@ -116,7 +120,8 @@ pub struct FileRow {
     /// The incoming change is a deletion.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub deleted: bool,
-    /// Can run commands (ask tier): always shown before applying.
+    /// Something here runs what's in it (a shell, Hyprland, an editor…):
+    /// always shown before applying, never applied automatically.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub runs_commands: bool,
 }
@@ -539,10 +544,14 @@ impl SyncEngine {
         let Some(d) = ev.tags.identifier() else {
             return false;
         };
+        let at = ev.created_at.as_secs();
+        if at > now() + MAX_CLOCK_AHEAD {
+            tracing::debug!("ignoring an event dated {}s in the future", at - now());
+            return false;
+        }
         let Some(item) = envelope::open(&self.keys, &d, &ev.content) else {
             return false;
         };
-        let at = ev.created_at.as_secs();
         let _ = self.store.set_since(at);
         let new = match &item {
             Item::File(f) => {
@@ -619,7 +628,7 @@ impl SyncEngine {
                 .then(|| remote.as_ref().map(|r| name_of(&r.entry.device)))
                 .flatten(),
                 deleted: remote.as_ref().is_some_and(|r| r.entry.deleted),
-                runs_commands: tier == Some(Tier::Ask),
+                runs_commands: manifest.runs_commands(&path),
                 path,
                 status,
                 tier,
@@ -785,6 +794,9 @@ impl SyncEngine {
         }
         let stamp = now();
         let backup = self.backups_dir.join(stamp.to_string());
+        // Opened when the first file needs saving; written to like home
+        // (beneath it, no links, 0600).
+        let mut vault: Option<Home> = None;
         let mut backed_up = Vec::new();
         let mut from = Vec::new();
         for row in chosen {
@@ -796,9 +808,11 @@ impl SyncEngine {
                     .ok_or_else(|| anyhow::anyhow!("nothing to apply"))?;
                 // Back up what's here first.
                 if let Some(current) = self.home.read(path)? {
-                    let dest = backup.join(path);
-                    std::fs::create_dir_all(dest.parent().expect("has a parent"))?;
-                    std::fs::write(&dest, current)?;
+                    let vault = match &vault {
+                        Some(v) => v,
+                        None => vault.insert(open_backup_dir(&backup)?),
+                    };
+                    vault.write_private(path, &current)?;
                     backed_up.push(path.clone());
                 }
                 if remote.entry.deleted {
@@ -806,7 +820,7 @@ impl SyncEngine {
                     self.store.set_synced(path, None, stamp)?;
                 } else {
                     let content = envelope::assemble(&remote.entry, |sha| self.store.chunk(sha))?;
-                    self.home.write(path, &content)?;
+                    self.home.write(path, &content, false)?;
                     self.store
                         .set_synced(path, Some(&remote.entry.sha256), stamp)?;
                 }
@@ -869,13 +883,19 @@ impl SyncEngine {
             .find(|h| h.id == history_id)
             .ok_or_else(|| anyhow::anyhow!("nothing to undo"))?;
         anyhow::ensure!(!entry.undone, "already undone");
-        let dir = entry.backup_dir.map(PathBuf::from);
+        let vault = match entry.backup_dir.as_deref().map(std::path::Path::new) {
+            Some(dir) if dir.is_dir() => Some(Home::open(dir)?),
+            _ => None,
+        };
         let mut restored = Vec::new();
         for path in &entry.paths {
-            let content = match dir.as_ref().map(|d| d.join(path)).filter(|p| p.exists()) {
-                Some(saved) => {
-                    let content = std::fs::read(saved)?;
-                    self.home.write(path, &content)?;
+            let saved = match &vault {
+                Some(v) => v.read(path)?,
+                None => None,
+            };
+            let content = match saved {
+                Some(content) => {
+                    self.home.write(path, &content, false)?;
                     Some(content)
                 }
                 // It didn't exist before the apply.
@@ -1261,6 +1281,18 @@ pub fn valid_plugin_id(id: &str) -> bool {
 
 fn now() -> u64 {
     Timestamp::now().as_secs()
+}
+
+/// Make the folder for one apply's backups (owner-only) and open it the
+/// way home is opened, so files are saved beneath it and never through a
+/// link.
+fn open_backup_dir(dir: &std::path::Path) -> anyhow::Result<Home> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    Ok(Home::open(dir)?)
 }
 
 #[cfg(test)]

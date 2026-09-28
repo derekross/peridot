@@ -64,6 +64,26 @@ const LOCAL: &[&str] = &[
     "**/.luarc.json",
 ];
 
+/// Files whose contents are run, sourced or evaluated by something on the
+/// other computer (a shell, a window manager, an editor, a hook). Whatever
+/// their tier, they're never applied without you looking first.
+const RUNS_COMMANDS: &[&str] = &[
+    ".config/hypr/*.lua",
+    ".config/hypr/*.conf",
+    ".config/hypr/autostart.lua",
+    ".config/omarchy/extensions/**",
+    ".config/omarchy/hooks/**",
+    ".bashrc",
+    ".config/kitty/**",
+    ".config/ghostty/**",
+    ".config/alacritty/**",
+    ".config/tmux/**",
+    ".config/starship.toml",
+    ".config/lazygit/config.yml",
+    ".config/mpv/**",
+    ".config/nvim/**",
+];
+
 const NEVER: &[&str] = &[
     ".ssh/**",
     ".gnupg/**",
@@ -119,6 +139,7 @@ pub struct Manifest {
     ask: GlobSet,
     local: GlobSet,
     never: GlobSet,
+    runs_commands: GlobSet,
     enabled: GlobSet,
     excluded: GlobSet,
     choices: Choices,
@@ -131,6 +152,7 @@ impl Manifest {
             ask: set(ASK),
             local: set(LOCAL),
             never: set(NEVER),
+            runs_commands: set(RUNS_COMMANDS),
             enabled: set(&choices.enabled),
             excluded: set(&choices.excluded),
             choices,
@@ -157,6 +179,13 @@ impl Manifest {
             return Some(Tier::Shared);
         }
         None
+    }
+
+    /// Whether something on this computer runs what's in `path` (a shell,
+    /// Hyprland, a terminal, an editor, a hook). Independent of tier: such
+    /// files are shown before they're applied, and auto-apply skips them.
+    pub fn runs_commands(&self, path: &str) -> bool {
+        self.runs_commands.is_match(path)
     }
 
     /// Whether `path` syncs with the current choices.
@@ -336,6 +365,43 @@ mod tests {
         assert_eq!(m.tier("/etc/passwd"), Some(Tier::Never));
         assert_eq!(m.tier(".config/hypr/./x.lua"), Some(Tier::Never));
         assert_eq!(m.tier("Documents/notes.txt"), None);
+    }
+
+    #[test]
+    fn files_that_run_commands_are_known_whatever_their_tier() {
+        let m = Manifest::new(Choices::default());
+        for p in [
+            ".config/hypr/bindings.lua",
+            ".config/hypr/hyprsunset.conf",
+            ".config/hypr/autostart.lua",
+            ".config/omarchy/extensions/menu/x.sh",
+            ".config/omarchy/hooks/theme-set",
+            ".bashrc",
+            ".config/kitty/kitty.conf",
+            ".config/ghostty/config",
+            ".config/alacritty/alacritty.toml",
+            ".config/tmux/tmux.conf",
+            ".config/starship.toml",
+            ".config/lazygit/config.yml",
+            ".config/mpv/input.conf",
+            ".config/nvim/init.lua",
+            ".config/nvim/lua/plugins/x.lua",
+        ] {
+            assert!(m.runs_commands(p), "{p}");
+        }
+        // Shared tier, but it can still run commands.
+        assert_eq!(m.tier(".config/hypr/bindings.lua"), Some(Tier::Shared));
+        for p in [
+            ".config/omarchy/shell.json",
+            ".config/omarchy/branding/logo.txt",
+            ".config/btop/btop.conf",
+            ".config/git/config",
+            ".config/mimeapps.list",
+            ".XCompose",
+            ".config/foot/foot.ini",
+        ] {
+            assert!(!m.runs_commands(p), "{p}");
+        }
     }
 
     #[test]
