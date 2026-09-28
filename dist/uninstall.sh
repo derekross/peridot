@@ -45,7 +45,7 @@ print_paths
 # anything else.
 for p in "${!MANIFEST_HASH[@]}"; do
   case $p in
-    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
+    "$BINDIR/peridotd" | "$BINDIR/peridot" | "$INSTALLER" | "$UNIT" | "$INSTALL_UNIT" | "$MENU" | "$PLUGIN_PATH"/*) ;;
     *) note "ignoring a record line for $p: not a path this script writes"; unset 'MANIFEST_HASH[$p]' ;;
   esac
 done
@@ -81,9 +81,24 @@ case $UNIT_STATE in
 esac
 (( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
 
+# The install template: any instance still running is stopped with it.
+inspect_install_unit
+case $INSTALL_UNIT_STATE in
+  owned)
+    systemctl_user stop 'peridot-install@*.service'
+    remove_owned "$INSTALL_UNIT" "$(file_hash "$INSTALL_UNIT")"
+    systemctl_user daemon-reload ;;
+  edited) note "$INSTALL_UNIT is kept: you changed it. It runs the script this removes; remove it yourself when you're done with it." ;;
+  elsewhere) note "peridot-install@.service comes from $INSTALL_UNIT_FRAGMENT; not Peridot's, leaving it alone." ;;
+  symlink) note "$INSTALL_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
+  foreign) note "$INSTALL_UNIT isn't Peridot's; leaving it alone." ;;
+  other) note "$INSTALL_UNIT isn't a regular file; leaving it alone." ;;
+  missing) ;;
+esac
+
 # ── Binaries ───────────────────────────────────────────────────────────
 say "Removing binaries"
-for bin in peridotd peridot; do
+for bin in peridotd peridot peridot-install; do
   p="$BINDIR/$bin"
   case "$(binary_state "$p")" in
     owned) remove_owned "$p" "$(file_hash "$p")" ;;

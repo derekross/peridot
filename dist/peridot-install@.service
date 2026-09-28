@@ -1,0 +1,23 @@
+# Installed by Peridot (https://github.com/derekross/peridot); install.sh and
+# uninstall.sh only replace or remove this file while this line is here.
+#
+# One Omarchy install (a theme, a plugin, or a theme switch) that Peridot's
+# daemon asked for and you confirmed. The daemon runs in a sandbox that can't
+# run Omarchy's installers, so it starts an instance of this unit instead:
+# peridot-install@<kind>:<base64url argument>.service. What runs is fixed
+# here; ~/.local/bin/peridot-install checks the argument again and runs the
+# matching Omarchy command with a small environment of its own.
+[Unit]
+Description=Peridot: Omarchy install %i
+Documentation=https://github.com/derekross/peridot
+CollectMode=inactive-or-failed
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/peridot-install %i
+# From systemd's own record of you, not from anything a caller could set.
+Environment=HOME=%h USER=%u LOGNAME=%u XDG_RUNTIME_DIR=%t
+# Omarchy's installers need your session (the display, the bus, git), so
+# this unit isn't sandboxed beyond this; it can't gain privileges.
+NoNewPrivileges=yes
+RuntimeMaxSec=300

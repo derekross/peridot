@@ -33,6 +33,8 @@ STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 BINDIR="$HOME/.local/bin"
 UNITDIR="$CONFIG_HOME/systemd/user"            # systemd honours XDG_CONFIG_HOME
 UNIT="$UNITDIR/peridot.service"
+INSTALL_UNIT="$UNITDIR/peridot-install@.service"   # runs Omarchy installs outside the daemon's sandbox
+INSTALLER="$BINDIR/peridot-install"                # what that template unit runs
 PLUGINDIR="$HOME/.config/omarchy/plugins"      # where Omarchy itself looks
 MENU="$HOME/.config/omarchy/extensions/omarchy-menu.jsonc"   # Omarchy's, not XDG
 STATEDIR="$STATE_HOME/peridot"
@@ -146,6 +148,8 @@ load_known() {
   done <dist/known-hashes.tsv
   # This checkout counts too (an install made from it without a record).
   KNOWN["$(file_hash dist/peridot.service)"$'\t'unit]=checkout
+  KNOWN["$(file_hash dist/peridot-install@.service)"$'\t'install-unit]=checkout
+  KNOWN["$(file_hash dist/peridot-install)"$'\t'bin/peridot-install]=checkout
   while IFS= read -r -d '' f; do
     [[ ${f#shell-plugin/} == manifest.json ]] && continue
     KNOWN["$(file_hash "$f")"$'\t'"plugin/${f#shell-plugin/}"]=checkout
@@ -451,6 +455,27 @@ inspect_unit() {
 unit_runs_our_binary() { [[ $UNIT_EXECSTART == *"$BINDIR/peridotd"* ]]; }
 unit_is_active() { systemctl --user is-active --quiet peridot.service 2>/dev/null; }
 
+# The install template unit (peridot-install@.service), the same way.
+INSTALL_UNIT_KIND=missing INSTALL_UNIT_STATE=missing INSTALL_UNIT_FRAGMENT=
+inspect_install_unit() {
+  INSTALL_UNIT_KIND="$(path_kind "$INSTALL_UNIT")"
+  # (systemctl show wants an instance; any name finds the template.)
+  local show
+  show="$(systemctl --user show -p FragmentPath 'peridot-install@peridot.service' 2>/dev/null || true)"
+  INSTALL_UNIT_FRAGMENT="$(printf '%s\n' "$show" | awk -F= '$1 == "FragmentPath" { print substr($0, 14) }')"
+  case $INSTALL_UNIT_KIND in
+    missing)
+      if [[ -n $INSTALL_UNIT_FRAGMENT && $INSTALL_UNIT_FRAGMENT != /dev/null ]]; then INSTALL_UNIT_STATE=elsewhere; else INSTALL_UNIT_STATE=missing; fi ;;
+    symlink) INSTALL_UNIT_STATE=symlink ;;
+    dir | other) INSTALL_UNIT_STATE=other ;;
+    file)
+      if [[ -n $INSTALL_UNIT_FRAGMENT && $INSTALL_UNIT_FRAGMENT != "$INSTALL_UNIT" && $INSTALL_UNIT_FRAGMENT != /dev/null ]]; then INSTALL_UNIT_STATE=elsewhere
+      elif owned_file "$INSTALL_UNIT" install-unit; then INSTALL_UNIT_STATE=owned
+      elif grep -qF -- "$PERIDOT_URL" "$INSTALL_UNIT"; then INSTALL_UNIT_STATE=edited
+      else INSTALL_UNIT_STATE=foreign; fi ;;
+  esac
+}
+
 # binary_state <path>: missing | symlink | other | owned | unrecorded
 binary_state() {
   case "$(path_kind "$1")" in
@@ -700,8 +725,8 @@ PINNED_COMMIT=
 
 print_paths() {
   say "Paths:"
-  note "binaries  $BINDIR/peridotd, $BINDIR/peridot"
-  note "service   $UNIT"
+  note "binaries  $BINDIR/peridotd, $BINDIR/peridot, $INSTALLER"
+  note "services  $UNIT, $INSTALL_UNIT"
   note "plugin    $PLUGIN_PATH"
   note "menu      $MENU"
   note "record    $MANIFEST$( [[ -f $MANIFEST ]] || printf ' (none yet)')"

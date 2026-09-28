@@ -1300,25 +1300,65 @@ fn offer_from(params: Value) -> Result<Offer> {
 /// Run an Omarchy command in your session (outside the daemon's sandbox)
 /// with fixed arguments, and wait for it.
 async fn run_omarchy(program: &str, args: &[&str]) -> Result<()> {
-    let mut cmd = tokio::process::Command::new("systemd-run");
-    cmd.args([
+    use base64::Engine;
+    // Installs run outside this sandbox as an instance of
+    // peridot-install@.service (dist/), a template whose fixed ExecStart is
+    // ~/.local/bin/peridot-install. The only thing that crosses over is the
+    // instance name, <kind>:<base64url argument>; the script decodes it,
+    // checks it again and runs the matching Omarchy command with an
+    // environment of its own. Nothing from this process reaches it.
+    let (kind, arg) = match (program, args) {
+        ("omarchy-theme-install", [url]) => ("theme", *url),
+        ("omarchy-plugin-add", [url]) => ("plugin", *url),
+        ("omarchy-theme-set", [name]) => ("theme-set", *name),
+        _ => bail!("{program}: not something Peridot runs"),
+    };
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(arg.as_bytes());
+    let unit = format!("peridot-install@{kind}:{encoded}.service");
+    // Unit names are capped at 255 bytes; repository addresses are far shorter.
+    anyhow::ensure!(
+        unit.len() <= 255,
+        "{program}: that address is too long to install"
+    );
+    let mut cmd = tokio::process::Command::new("systemctl");
+    cmd.args(["--user", "--quiet", "start", "--wait", &unit])
+        .stdin(std::process::Stdio::null());
+    // The unit stops itself after RuntimeMaxSec=300; this only guards
+    // against systemctl not coming back.
+    let out = tokio::time::timeout(Duration::from_secs(330), cmd.output()).await??;
+    if out.status.success() {
+        return Ok(());
+    }
+    // The command's own last words, from the journal (its output goes
+    // there, not to us): only what the unit's processes printed.
+    let mut log = tokio::process::Command::new("journalctl");
+    log.args([
         "--user",
         "--quiet",
-        "--collect",
-        "--wait",
-        "--pipe",
-        "--",
-        program,
+        "--no-pager",
+        "--output=cat",
+        "--lines=1",
+        "--since=-10min",
+        "--unit",
+        &unit,
+        "_TRANSPORT=stdout",
     ])
-    .args(args)
     .stdin(std::process::Stdio::null());
-    let out = tokio::time::timeout(Duration::from_secs(300), cmd.output()).await??;
-    if !out.status.success() {
-        let why = String::from_utf8_lossy(&out.stderr);
-        let why = why.lines().last().unwrap_or("it failed");
-        bail!("{program}: {why}");
+    let why = match tokio::time::timeout(Duration::from_secs(10), log.output()).await {
+        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .last()
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    };
+    if why.is_empty() {
+        let status = String::from_utf8_lossy(&out.stderr);
+        let status = status.lines().next().unwrap_or("it failed").trim();
+        bail!("{program}: {status}");
     }
-    Ok(())
+    bail!("{program}: {why}");
 }
 
 /// Start using `pubkey` on this computer. If it already has settings on the

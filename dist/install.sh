@@ -145,8 +145,12 @@ print_paths
 STOPS=()
 stop() { STOPS+=("$*"); }
 
+# The two binaries, and the script peridot-install@.service runs: installed
+# to ~/.local/bin by the same rules.
+BINS=(peridotd peridot peridot-install)
+declare -A BIN_SOURCE=([peridotd]="$BIN_SRC/peridotd" [peridot]="$BIN_SRC/peridot" [peridot-install]=dist/peridot-install)
 declare -A BIN_STATE=() BIN_HASH=()
-for bin in peridotd peridot; do
+for bin in "${BINS[@]}"; do
   p="$BINDIR/$bin"
   BIN_STATE[$bin]="$(binary_state "$p")"
   BIN_HASH[$bin]="$(file_hash "$p")"
@@ -163,6 +167,15 @@ case $UNIT_STATE in
   symlink) stop "$UNIT is a symbolic link: the unit is masked or linked (systemctl --user mask/link). Peridot won't replace it; unmask or unlink it, then run this again." ;;
   other) stop "$UNIT exists and isn't a regular file. Move it aside, then run this again." ;;
   foreign) stop "$UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
+esac
+
+inspect_install_unit
+INSTALL_UNIT_HASH="$(file_hash "$INSTALL_UNIT")"
+case $INSTALL_UNIT_STATE in
+  elsewhere) stop "peridot-install@.service is already provided by $INSTALL_UNIT_FRAGMENT; installing Peridot's would shadow it. Remove or rename that unit first." ;;
+  symlink) stop "$INSTALL_UNIT is a symbolic link (masked or linked). Peridot won't replace it; unmask or unlink it, then run this again." ;;
+  other) stop "$INSTALL_UNIT exists and isn't a regular file. Move it aside, then run this again." ;;
+  foreign) stop "$INSTALL_UNIT exists and isn't Peridot's (no Peridot mark in it). Move it aside, then run this again." ;;
 esac
 
 inspect_menu
@@ -182,7 +195,7 @@ fi
 
 # ── 3. Questions ───────────────────────────────────────────────────────
 declare -A REPLACE=()
-for bin in peridotd peridot; do
+for bin in "${BINS[@]}"; do
   p="$BINDIR/$bin"
   [[ ${BIN_STATE[$bin]} == unrecorded ]] || continue
   if [[ -n ${CONSENT[$p]:-} ]]; then REPLACE[$bin]=1; continue; fi
@@ -209,15 +222,15 @@ fi
 # ── 4. Write ───────────────────────────────────────────────────────────
 say "Installing binaries to $BINDIR"
 mkdir -p -- "$BINDIR"
-for bin in peridotd peridot; do
+for bin in "${BINS[@]}"; do
   p="$BINDIR/$bin"
   case ${BIN_STATE[$bin]} in
-    missing) replace_owned "$BIN_SRC/$bin" "$p" 755 "" ;;
-    owned) replace_owned "$BIN_SRC/$bin" "$p" 755 "${BIN_HASH[$bin]}" ;;
+    missing) replace_owned "${BIN_SOURCE[$bin]}" "$p" 755 "" ;;
+    owned) replace_owned "${BIN_SOURCE[$bin]}" "$p" 755 "${BIN_HASH[$bin]}" ;;
     unrecorded)
       backup_file "$p" "$bin"
       note "moved the previous $p to $BACKUP_DEST"
-      replace_owned "$BIN_SRC/$bin" "$p" 755 "" ;;
+      replace_owned "${BIN_SOURCE[$bin]}" "$p" 755 "" ;;
   esac
 done
 
@@ -236,6 +249,19 @@ case $UNIT_STATE in
     say "Keeping your $UNIT (you changed it; Peridot's version isn't installed)" ;;
 esac
 (( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
+
+# The template that runs Omarchy installs outside the daemon's sandbox.
+INSTALL_UNIT_WRITTEN=0
+case $INSTALL_UNIT_STATE in
+  missing)
+    say "Installing the install template unit"
+    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "" && INSTALL_UNIT_WRITTEN=1 ;;
+  owned)
+    say "Updating the install template unit"
+    replace_owned "dist/peridot-install@.service" "$INSTALL_UNIT" 644 "$INSTALL_UNIT_HASH" && INSTALL_UNIT_WRITTEN=1 ;;
+  edited)
+    say "Keeping your $INSTALL_UNIT (you changed it; Peridot's version isn't installed)" ;;
+esac
 
 PLUGIN_CREATED=0 PLUGIN_TOUCHED=0
 case $PLUGIN_STATE in
@@ -269,6 +295,7 @@ case $UNIT_STATE in
     else
       say "peridot.service isn't running; not started (start it with: systemctl --user start peridot.service)."
     fi ;;
+  *) (( INSTALL_UNIT_WRITTEN )) && systemctl_user daemon-reload ;;
 esac
 
 case $MENU_STATE in

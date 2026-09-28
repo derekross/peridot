@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Installed by Peridot (https://github.com/derekross/peridot) as
+# ~/.local/bin/peridot-install; install.sh and uninstall.sh only replace or
+# remove this file while it is exactly what they wrote.
+#
+# Runs one Omarchy install on Peridot's behalf, outside the daemon's sandbox:
+#
+#   peridot-install theme:<base64url of an https address>   omarchy-theme-install <address>
+#   peridot-install plugin:<base64url of an https address>  omarchy-plugin-add <address>
+#   peridot-install theme-set:<base64url of a theme name>   omarchy-theme-set <name>
+#
+# The daemon (peridotd) never runs this itself: it asks systemd to start
+# peridot-install@<argument>.service, a template unit whose fixed ExecStart
+# is this script, so the only thing that crosses from the daemon to your
+# session is that one argument. It is checked again here, on the same terms
+# the daemon uses (an https address on github.com, gitlab.com or
+# codeberg.org; a theme name as Omarchy spells them), and the Omarchy
+# command runs with a small, fixed environment built from what systemd
+# knows about you: nothing the daemon has, or could set, reaches it.
+set -euo pipefail
+
+die() { printf 'peridot-install: %s\n' "$*" >&2; exit 2; }
+
+[[ $# -eq 1 ]] || die "usage: peridot-install <theme|plugin|theme-set>:<base64url argument>"
+[[ $1 =~ ^(theme|plugin|theme-set):([A-Za-z0-9_-]{1,400})$ ]] || die "not an install request: ${1:0:40}"
+kind=${BASH_REMATCH[1]} encoded=${BASH_REMATCH[2]}
+
+# base64url without padding: back to the standard alphabet, padded, decoded.
+pad=$(( (4 - ${#encoded} % 4) % 4 ))
+(( pad != 3 )) || die "not an install request: bad encoding"
+arg="$(printf '%s%s' "$(printf '%s' "$encoded" | tr -- '-_' '+/')" "$(printf '%*s' "$pad" '' | tr ' ' '=')" | base64 -d 2>/dev/null)" \
+  || die "not an install request: bad encoding"
+
+case $kind in
+  theme | plugin)
+    (( ${#arg} < 300 )) || die "that address is too long"
+    [[ $arg =~ ^https://(github\.com|gitlab\.com|codeberg\.org)/[A-Za-z0-9._~/:%+-]+$ ]] \
+      || die "not an address Peridot installs from: ${arg:0:80}"
+    [[ $arg != *//* || ${arg#https://} != *//* ]] || die "not an address Peridot installs from: ${arg:0:80}"
+    ;;
+  theme-set)
+    [[ $arg =~ ^[a-z0-9-]{1,64}$ ]] || die "not a theme name: ${arg:0:40}"
+    ;;
+esac
+
+# The environment the Omarchy command gets. HOME, USER and XDG_RUNTIME_DIR
+# are set by the unit from systemd's own record of you (%h, %u, %t); the
+# display and bus variables are taken from the session only in the shapes
+# they can have. Nothing else is passed on.
+[[ ${HOME:-} == /* ]] || die "HOME isn't set"
+uid="$(id -u)"
+user="${USER:-$(id -un)}"
+runtime="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+[[ $runtime == /* ]] || runtime="/run/user/$uid"
+env=(HOME="$HOME" USER="$user" LOGNAME="$user" XDG_RUNTIME_DIR="$runtime" TERM=dumb)
+[[ ${LANG:-} =~ ^[A-Za-z0-9._@-]{1,40}$ ]] && env+=(LANG="$LANG")
+if [[ ${DBUS_SESSION_BUS_ADDRESS:-} == unix:path=/* ]]; then env+=(DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS")
+else env+=(DBUS_SESSION_BUS_ADDRESS="unix:path=$runtime/bus"); fi
+[[ ${WAYLAND_DISPLAY:-} =~ ^[A-Za-z0-9._-]{1,64}$ ]] && env+=(WAYLAND_DISPLAY="$WAYLAND_DISPLAY")
+[[ ${DISPLAY:-} =~ ^:[0-9]{1,4}(\.[0-9]{1,4})?$ ]] && env+=(DISPLAY="$DISPLAY")
+# hyprctl (theme-set reloads Hyprland) finds the compositor by this.
+[[ ${HYPRLAND_INSTANCE_SIGNATURE:-} =~ ^[A-Za-z0-9_-]{1,128}$ ]] && env+=(HYPRLAND_INSTANCE_SIGNATURE="$HYPRLAND_INSTANCE_SIGNATURE")
+
+# Where Omarchy is: the package (/usr/share/omarchy) or the older per-user
+# copy. OMARCHY_PATH from the environment is honoured only when it names
+# one of those two; PATH is never inherited.
+omarchy=
+for candidate in "${OMARCHY_PATH:-}" /usr/share/omarchy "$HOME/.local/share/omarchy"; do
+  [[ $candidate == /usr/share/omarchy || $candidate == "$HOME/.local/share/omarchy" ]] || continue
+  [[ -d $candidate/bin ]] || continue
+  omarchy=$candidate; break
+done
+[[ -n $omarchy ]] || die "Omarchy isn't installed here (no bin/ under /usr/share/omarchy or ~/.local/share/omarchy)"
+env+=(OMARCHY_PATH="$omarchy" PATH="$omarchy/bin:/usr/local/bin:/usr/bin:/bin")
+
+case $kind in
+  theme) cmd=omarchy-theme-install ;;
+  # No --yes: a plugin is code, and Omarchy's own confirmation stands.
+  plugin) cmd=omarchy-plugin-add ;;
+  theme-set) cmd=omarchy-theme-set ;;
+esac
+[[ -x $omarchy/bin/$cmd ]] || die "$cmd isn't in $omarchy/bin"
+exec /usr/bin/env -i "${env[@]}" "$omarchy/bin/$cmd" "$arg"

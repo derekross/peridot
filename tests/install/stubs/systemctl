@@ -2,7 +2,11 @@
 echo "systemctl $*" >> "${FAKE_LOG:-/dev/null}"
 case "$2" in
   is-active) exit "${FAKE_ACTIVE_RC:-3}" ;;
-  show) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_FRAGMENT:-}" "${FAKE_EXECSTART:-}" ;;
+  show)
+    case "$*" in
+      *peridot-install@*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_INSTALL_FRAGMENT:-}" ;;
+      *) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_FRAGMENT:-}" "${FAKE_EXECSTART:-}" ;;
+    esac ;;
   status) echo "* opal.service - fake" ;;
 esac
 exit 0
