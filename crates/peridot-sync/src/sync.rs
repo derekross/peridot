@@ -294,26 +294,62 @@ impl SyncEngine {
         let mut unknown: BTreeMap<String, (Event, u64)> = BTreeMap::new();
         let expected_ds: BTreeSet<&str> = expected.iter().map(|(s, ..)| s.d.as_str()).collect();
         let mut reachable = 0;
+        // Relays where the root could be looked for at all (see below).
+        let mut root_checked = 0;
         for relay in &relays {
-            let root_filter = Filter::new()
-                .author(self.pubkey())
-                .kind(Kind::Custom(DATA_KIND))
-                .identifier(root_d.clone());
-            let fetched = self
-                .client
-                .fetch_events(vec![(relay.clone(), vec![self.filter(0), root_filter])])
-                .timeout(FETCH_TIMEOUT)
-                .await;
             let mut health = RelayHealth {
                 url: relay.to_string(),
                 ..Default::default()
             };
-            let Ok(events) = fetched else {
+            // Relay by relay, and the items apart from the root: a relay
+            // that serves private data only to its authenticated author
+            // (relay.ditto.pub does) answers a request that mixes the
+            // epoch's key and the identity with a refusal, and a refusal
+            // has to be seen, which the pooled fetch doesn't show.
+            let Ok(Some(conn)) = self.client.relay(relay).await else {
                 report.relays.push(health);
                 continue;
             };
+            // This epoch's own items first; without them the relay is
+            // as good as unreachable. The others (the previous epoch's,
+            // the rekey address) may be refused and don't count.
+            // All at once, so a relay that answers nothing costs one
+            // timeout, not one per request.
+            let root_filter = Filter::new()
+                .author(self.pubkey())
+                .kind(Kind::Custom(DATA_KIND))
+                .identifier(root_d.clone());
+            let mut requests = self.filters(0);
+            requests.push(root_filter);
+            let answers = futures::future::join_all(requests.into_iter().map(|f| {
+                let conn = conn.clone();
+                async move { conn.fetch_events(f).timeout(FETCH_TIMEOUT).await }
+            }))
+            .await;
+            let mut answers = answers.into_iter();
+            let own = answers.next().expect("at least this epoch");
+            let root_answer = answers.next_back().expect("the root");
+            let Ok(mut events) = own else {
+                report.relays.push(health);
+                continue;
+            };
+            for more in answers.flatten() {
+                events.extend(more);
+            }
             health.reachable = true;
             reachable += 1;
+            // The root is the identity's; a relay that only serves what
+            // the logged-in key wrote can't show it to the epoch's key, and
+            // an empty answer looks the same as none. So the root is not
+            // counted against any one relay (below): it is published again
+            // when no relay shows it at all.
+            match root_answer {
+                Ok(roots) => {
+                    root_checked += 1;
+                    events.extend(roots);
+                }
+                Err(e) => tracing::debug!("{relay}: the root can't be looked for here: {e}"),
+            }
             let mut held = BTreeSet::new();
             for ev in events.iter() {
                 let Some(d) = ev.tags.identifier() else {
@@ -344,8 +380,7 @@ impl SyncEngine {
             health.missing = expected
                 .iter()
                 .filter(|(s, ..)| !held.contains(&s.d))
-                .count()
-                + usize::from(!held.contains(&root_d));
+                .count();
             report.relays.push(health);
         }
         if reachable == 0 {
@@ -372,12 +407,15 @@ impl SyncEngine {
         for (sealed, after) in again {
             self.queue(std::slice::from_ref(&sealed), after).await?;
         }
+        // The root, the recovery anchor, needs to be somewhere, not
+        // everywhere (see above): published again when no relay that could
+        // be asked shows it, or when it is getting old.
         let root_on = holders.get(&root_d).map(BTreeSet::len).unwrap_or(0);
         let root_at = newest.get(&root_d).copied().unwrap_or(0);
-        if root_on < reachable || now.saturating_sub(root_at) > REFRESH_AFTER {
+        if root_checked > 0 && (root_on == 0 || now.saturating_sub(root_at) > REFRESH_AFTER) {
             match self.publish_root().await {
                 Ok(()) => {
-                    if root_on < reachable {
+                    if root_on == 0 {
                         report.resent += 1;
                     } else {
                         report.refreshed += 1;
@@ -534,12 +572,30 @@ impl SyncEngine {
         a
     }
 
-    /// The filter for everything of ours from `since`.
+    /// The filter for everything of ours from `since`, all authors in one.
     pub fn filter(&self, since: u64) -> Filter {
         Filter::new()
             .authors(self.authors())
             .kind(Kind::Custom(DATA_KIND))
             .since(Timestamp::from(since))
+    }
+
+    /// The same, one filter per author, each sent as a request of its own.
+    /// A relay that serves private data only to its authenticated author
+    /// (relay.ditto.pub does) refuses a request naming anyone else, and
+    /// only the epoch's key is logged in: asked apart, it serves this
+    /// epoch's items and refuses the rest, which other relays carry. The
+    /// first is always this epoch's own.
+    pub fn filters(&self, since: u64) -> Vec<Filter> {
+        self.authors()
+            .into_iter()
+            .map(|a| {
+                Filter::new()
+                    .author(a)
+                    .kind(Kind::Custom(DATA_KIND))
+                    .since(Timestamp::from(since))
+            })
+            .collect()
     }
 
     /// The epoch this computer is on.
@@ -574,26 +630,35 @@ impl SyncEngine {
             anyhow::bail!("can't reach your sync servers");
         }
         let since = self.store.since().saturating_sub(CATCH_UP_MARGIN);
-        let targets: Vec<(RelayUrl, Vec<Filter>)> = self
-            .relays
-            .read()
-            .await
-            .iter()
-            .map(|r| (r.clone(), vec![self.filter(since)]))
-            .collect();
-        match self
-            .client
-            .fetch_events(targets)
-            .timeout(FETCH_TIMEOUT)
-            .await
-        {
-            Ok(events) => {
-                let new = events.iter().filter(|e| self.ingest(e)).count();
-                self.mark_caught_up();
-                Ok(new)
+        // One request per relay and author (see `filters`); a relay that
+        // refuses an author it can't serve still answers for the others.
+        let relays = self.relays.read().await.clone();
+        let mut lookups = Vec::new();
+        for r in &relays {
+            let Ok(Some(conn)) = self.client.relay(r).await else {
+                continue;
+            };
+            for f in self.filters(since) {
+                let conn = conn.clone();
+                lookups.push(async move { conn.fetch_events(f).timeout(FETCH_TIMEOUT).await });
             }
-            Err(e) => Err(anyhow::anyhow!("catching up failed: {e}")),
         }
+        let mut answered = false;
+        let mut new = 0;
+        for r in futures::future::join_all(lookups).await {
+            match r {
+                Ok(events) => {
+                    answered = true;
+                    new += events.iter().filter(|e| self.ingest(e)).count();
+                }
+                Err(e) => tracing::debug!("a catch-up request was refused: {e}"),
+            }
+        }
+        if !answered {
+            anyhow::bail!("catching up failed: no server answered");
+        }
+        self.mark_caught_up();
+        Ok(new)
     }
 
     /// Whether this computer has heard from the servers at least once with
@@ -871,8 +936,18 @@ impl SyncEngine {
     /// Publish the root event (the sync secret, encrypted to our own key)
     /// so a recovery kit can restore everything.
     pub async fn publish_root(&self) -> anyhow::Result<()> {
-        self.outbox
-            .push(&self.identity.root_event(self.signer.as_ref()).await?)?;
+        // Dated after the root the servers hold now, so it replaces it
+        // even within the same second (offline, "now" is all there is).
+        let after = match self.fetch_root().await {
+            Ok(Some(root)) => root.created_at.as_secs(),
+            _ => 0,
+        };
+        self.outbox.push(
+            &self
+                .identity
+                .root_event(self.signer.as_ref(), after)
+                .await?,
+        )?;
         self.flush().await;
         Ok(())
     }

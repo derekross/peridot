@@ -42,7 +42,7 @@ All sync events are kind `30078` (NIP-78 application data). Pairing uses the eph
 
 ### 2.1 Identity key
 
-A secp256k1 Nostr key pair. The client MAY hold it or MAY delegate to an external signer (Peridot uses Opal; the client then never sees the secret key and asks the signer for signatures and NIP-44 self-encryption). It signs the root event (section 5), and in the legacy epoch 0 only, items and deletions (section 7). In the reference implementation it also signs NIP-42 relay authentication (section 9.2).
+A secp256k1 Nostr key pair. The client MAY hold it or MAY delegate to an external signer (Peridot uses Opal; the client then never sees the secret key and asks the signer for signatures and NIP-44 self-encryption). It signs the root event (section 5), and in the legacy epoch 0 only, items, deletions and relay logins (section 7).
 
 ### 2.2 Device key
 
@@ -98,7 +98,7 @@ commitment(S) = hex( SHA256( "peridot/epoch-commit" ‖ u64_be(S.epoch) ‖ S.by
 | NIP-09 deletions of an epoch's items | `K_e` of that epoch; the identity key for epoch 0 |
 | Rotation event to `e + 1` | `R_{e+1}` |
 | Root event | the identity key |
-| NIP-42 AUTH | the identity key (9.2) |
+| NIP-42 AUTH | `K_e` of the current epoch; the identity key in epoch 0 (9.2) |
 | Pairing messages | one-time pairing keys (section 11) |
 
 ## 3. Item events
@@ -235,7 +235,7 @@ A deletion is a file entry with `deleted: true`, an empty `sha256`, `size: 0` an
 
 ### 4.1 Subscriptions
 
-A client at epoch `e` subscribes with one filter: `kinds: [30078]`, `authors:` the set below, `since:` a point in time.
+A client at epoch `e` subscribes for `kinds: [30078]` from the authors below, `since` a point in time, with **one request per author**: a relay that serves private data only to its logged-in author (9.2) answers a request naming several authors with a refusal, and asked apart it serves the epoch's own items and refuses the rest, which other relays carry.
 
 1. `K_e`, its own epoch's signing key (the identity key when `e = 0`);
 2. `K_{e-1}` while the previous epoch's window is open (6.3); the identity key when the previous epoch is 0;
@@ -311,11 +311,11 @@ body      = {"v": 2, "sync_secret": "v2:<e>:<hex>"}        // epoch ≥ 1
             {"v": 1, "sync_secret": "<hex>"}                // epoch 0
 ```
 
-The content is standard NIP-44 v2 from the identity key to itself (the ECDH self conversation key), produced by whoever holds the identity key, the client or the external signer. It is not size-class padded. Its `created_at` is the signer's current time.
+The content is standard NIP-44 v2 from the identity key to itself (the ECDH self conversation key), produced by whoever holds the identity key, the client or the external signer. It is not size-class padded. Like items, a root MUST be dated strictly after the newest root the publisher knows the relays to hold: `created_at = max(now, previous + 1)`. The root is addressable, and a replacement landing in the same second as the root it replaces could otherwise lose the relay's tie-break, leaving a restore with a stale secret.
 
 Reading: the reader MUST check that `pubkey` is the expected identity, that the `d` tag equals `root_name(identity)` and that the signature verifies; decrypt; require `v ≤ 2`; parse the secret text; and require `(v == 1) ⇔ (epoch == 0)`. Among several roots the newest `created_at` wins.
 
-The root is published when an identity is created, after every rotation (it names the new epoch), and by the audit when a relay lacks it or it is older than 30 days. A restored computer takes the secret from the root, generates a new device key, and MUST publish its own device entry so that it receives the next rotation.
+The root is published when an identity is created, after every rotation (it names the new epoch), and by the audit when no relay shows it or it is older than 30 days (section 10). A restored computer takes the secret from the root, generates a new device key, and MUST publish its own device entry so that it receives the next rotation.
 
 ## 6. Epochs
 
@@ -373,7 +373,7 @@ Epoch 0 is the first protocol version. Version 2 clients read it and never write
 | | Epoch 0 | Epoch ≥ 1 |
 |---|---|---|
 | KDF | `HKDF-SHA256(salt = "peridot/v1", ikm = S)`, info `"names"` or `"content"`, no epoch, no NUL | 2.4 |
-| signing key | none: items and deletions are signed by the identity key | `K_e` |
+| signing key | none: items, deletions and relay logins are signed by the identity key | `K_e` |
 | padding | none | size classes |
 | `created_at` | `max(now, after + 1, last_issued + 1)` | hour floor |
 | rekey address | none; an epoch 0 client does not listen for rotations | `R_{e+1}` |
@@ -426,13 +426,17 @@ A relay used for sync MUST accept:
 | 30078 | every item, and the root event; addressable, one `d` tag | `K_e`; the root by the identity key; everything by the identity key in epoch 0 |
 | 21078 | pairing messages (section 11); ephemeral, relays SHOULD NOT store them | one-time pairing keys |
 | 5 | NIP-09 deletions: a `k` tag of `30078` and up to 100 `a` tags of the form `30078:<pubkey>:<d>` | `K_e` of the epoch that published the items; the identity key for epoch 0 |
-| 22242 | NIP-42 authentication, when a relay asks | 9.2 |
+| 22242 | NIP-42 authentication, when a relay asks | `K_e`; the identity key in epoch 0 (9.2) |
 
 A full Peridot installation also uses kinds outside this protocol (24242 Blossom authorizations for private links; 0, 3, 7, 13, 14, 17, 1059, 1111, 1985, 10050 and 30490 for the profile, follows, Gallery and private messages). A client that only syncs needs only the four above.
 
 ### 9.2 Authentication
 
-A client MUST support NIP-42. When a relay sends an `AUTH` challenge, the client answers with a kind 22242 event carrying the standard `challenge` and `relay` tags. In the reference implementation this event is signed by the **identity** signer, the identity key or Opal on its behalf, not by `K_e`. A relay that requires AUTH therefore learns which identity is connected, even though the items it stores are signed by `K_e` and reveal nothing. An implementation MAY sign AUTH with `K_e` instead.
+A client MUST support NIP-42. When a relay sends an `AUTH` challenge, the client answers with a kind 22242 event carrying the standard `challenge` and `relay` tags, signed by the current epoch's signing key `K_e`, so a relay that requires logins learns no more about the identity than one that does not. In epoch 0 there is no `K_e` and the identity key logs in, as it signs everything else in that epoch. The root event, signed by the identity, is published over the same session. A relay that refuses events whose author differs from the logged-in key, beyond NIP-70 protected events, would refuse the root event and the previous epoch's deletions after a rotation; such a relay is not supported.
+
+A relay MAY serve kind 30078 only to a session logged in as the author (relay.ditto.pub does). Such a relay serves the epoch's items and the previous epoch's re-sealed items, but not the rotation announcement (authored by the rekey address) nor, to the epoch key's session, the identity's root; a client MUST therefore keep at least one relay that serves rotation events, and the audit does not hold the root's absence against any one relay (section 10).
+
+One login is made by the identity: the lookup of the root event on a computer that does not yet hold a sync secret (setup with an existing key, restore, 12.2), since no other key exists there yet. That lookup asks each relay separately and treats a relay that refused or did not answer as unknown, never as empty: a new sync secret is minted only when at least one relay answered and none had a root.
 
 ### 9.3 Sizes, retention, defaults
 
@@ -456,7 +460,7 @@ Once a day, and at startup when the last audit is older than a day, a client SHO
 1. For each relay separately, fetch the full item filter (`authors: [K_e]`, `since: 0`) and the root filter. A relay that does not answer within 15 s is unreachable. If no relay answers, the audit fails.
 2. For each event with a `d` tag by `K_e`, or by the identity for the root, record the newest `created_at` per `d` and which relays hold it. Events under a `d` that is not expected are candidates for removal. Every event is also ingested, since a relay that was down during a catch-up may hold news.
 3. Re-send every expected item that at least one reachable relay lacks, and re-publish every expected item whose newest copy anywhere is older than `REFRESH_AFTER` = 30 days, dated after the newest copy so it replaces rather than resurrects. Other computers' device entries are exempt from the age rule.
-4. Re-publish the root when a reachable relay lacks it or it is older than 30 days. This needs the identity signer; if it is unavailable, the root is left as is.
+4. Re-publish the root when no relay that could be asked shows it, or when it is older than 30 days. A relay that serves only its logged-in author (9.2) cannot show the root to the epoch key's session, and an empty answer is indistinguishable from a refusal, so the root is not counted against any one relay. Re-publishing needs the identity signer; if it is unavailable, the root is left as is.
 5. Among the unexpected names older than `CHUNK_GRACE` = 7 days, those that decrypt to a chunk no live entry references are stale. Delete them with kind 5 events (9.1) in batches of 100, signed by `K_e`.
 
 Implementation note: the reference sends the deletions on its own when the identity key is on the computer, and waits for the user when Opal holds the key, because Opal treats deletions as sensitive.
@@ -746,7 +750,7 @@ A kit can only be made where the identity key is present. When an external signe
 On a computer that is not yet set up:
 
 1. Open the kit: decode the `ncryptsec` and decrypt it with the normalized words, yielding the identity key.
-2. Fetch the root event from the configured relays (section 5); take the newest by `created_at`. If no relay could be reached, fail without concluding anything. If relays answered but none has a root, fail with "settings not found"; a restore never starts a fresh identity.
+2. Fetch the root event from each configured relay separately (section 5), logging in as the identity where a relay asks (9.2); take the newest by `created_at`. If no relay answered, fail without concluding anything. If relays answered but none has a root, fail with "settings not found"; a restore never starts a fresh identity.
 3. Open the root (section 5) and take the sync secret. `v == 1` means the legacy epoch.
 4. Generate a new device key: a restored computer is a new device, not the one that made the kit.
 5. Save the identity (key, sync secret, device key) and start syncing normally: catch up first, then announce the device entry with its device pubkey, so it receives the next rotation. On epoch 0 the migration of section 7 follows.
@@ -764,7 +768,7 @@ Handing the identity key to Opal changes nothing on the wire: the identity pubke
 **What the design provides.**
 
 - *Confidentiality of settings.* Every item is encrypted under a key derived from the sync secret before it leaves the computer; names are keyed hashes; sizes are padded to four classes and timestamps rounded to the hour. A relay sees that some Peridot syncs a few blobs an hour, not whose, what or how big.
-- *Unlinkability of sync traffic and identity.* Items and deletions are signed by the epoch signing key, not by the identity. Only the root event is signed by the identity, and it reveals nothing but that the key uses Peridot. A relay that requires NIP-42 AUTH does learn the identity of the connection (9.2).
+- *Unlinkability of sync traffic and identity.* Items and deletions are signed by the epoch signing key, not by the identity. Relay logins are signed by the epoch key too. Only the root event is signed by the identity, and it reveals nothing but that the key uses Peridot.
 - *Integrity.* Every event is signature-checked, decrypts only under the right keys, and a file entry names its path inside the ciphertext, so a relay cannot forge, splice or re-path an item. Replays are bounded by newest-wins on `created_at` with a deterministic tie-break, and by the 600 s future limit.
 - *Forward removal.* A removed computer cannot read anything published after the rotation, since it never receives the new secret, and the old copies are deleted after the window.
 - *Pairing.* A glimpsed code is not enough: it authenticates only the hello, and everything after needs `K0`, which needs ECDH(S, E) as well. An interposer who takes the joiner's `E` cannot grind an `S'` for the sponsor: `n_s` is committed before the sponsor sees `E`, `n_e` is fixed before the joiner sees `n_s`, and the number covers both nonces and every key. One guess in a million per code, and a wrong guess ends the pairing. A second computer answering the same code is visible to both sides. Nothing secret moves before two people say yes. The sync secret is encrypted to the joiner's permanent device key, not to `E`, and the identity's key travels only on explicit request. Ephemeral events are not stored, and the one-time keys are discarded, so there is nothing to replay or to decrypt later.

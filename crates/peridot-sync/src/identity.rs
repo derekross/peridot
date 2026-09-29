@@ -229,14 +229,26 @@ impl Identity {
     /// encrypted to ourselves, with a commitment to it in the clear so two
     /// rotations racing each other can be told apart. The one thing under
     /// your public key that says "Peridot"; recovery starts from it.
-    pub async fn root_event(&self, signer: &dyn IdentitySigner) -> anyhow::Result<Event> {
+    ///
+    /// `after` is the `created_at` of the newest root known to be on the
+    /// servers (0 if none): the root is addressable, so a relay keeps the
+    /// newer of two and breaks a tie by id, and a rotation's root landing
+    /// in the same second as the one it replaces could lose. This one is
+    /// dated strictly after, whatever the clock says.
+    pub async fn root_event(
+        &self,
+        signer: &dyn IdentitySigner,
+        after: u64,
+    ) -> anyhow::Result<Event> {
         let hex = self.secret.to_hex();
         let body = serde_json::to_string(&RootRef {
             v: if self.secret.is_legacy() { 1 } else { 2 },
             sync_secret: &hex,
         })?;
         let content = signer.nip44_self_encrypt(body).await?;
+        let at = Timestamp::now().as_secs().max(after + 1);
         let mut b = EventBuilder::new(Kind::Custom(DATA_KIND), content)
+            .custom_created_at(Timestamp::from(at))
             .tag(Tag::identifier(Self::root_name(&self.pubkey)));
         if !self.secret.is_legacy() {
             b = b.tag(Tag::custom("c", [self.secret.commitment()]));
@@ -334,7 +346,7 @@ mod tests {
         let id = Identity::generate();
         let keys = id.keys.clone().unwrap();
         let signer = LocalSigner(keys.clone());
-        let root = id.root_event(&signer).await.unwrap();
+        let root = id.root_event(&signer, 0).await.unwrap();
         assert!(root.verify().is_ok());
         assert!(!root.content.contains(id.secret.to_hex().as_str()));
         let back = Identity::from_root(id.pubkey(), Some(keys), &signer, &root)

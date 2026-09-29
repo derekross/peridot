@@ -305,10 +305,15 @@ impl App {
                 Mode::Interactive,
             )),
         };
-        // Signs relay logins (NIP-42), which private-data relays require.
-        let client = Client::builder()
-            .authenticator(SignerAuth(signer.clone()))
-            .build();
+        // Relay logins (NIP-42) are signed by the epoch's key, like the
+        // items, so a relay that requires them still learns nothing about
+        // the identity. The legacy epoch has no such key and logs in as the
+        // identity, which signs its items too.
+        let login: Arc<dyn IdentitySigner> = match identity.secret.keys().signer() {
+            Some(k) => Arc::new(LocalSigner(k.clone())),
+            None => signer.clone(),
+        };
+        let client = Client::builder().authenticator(SignerAuth(login)).build();
         let previous = Identity::load_previous(&self.secrets).await?;
         let engine = Arc::new(SyncEngine::new(SyncParams {
             signer,

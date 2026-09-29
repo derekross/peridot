@@ -10,7 +10,7 @@ use peridot_sync::gallery::ItemKind;
 use peridot_sync::identity::Identity;
 use peridot_sync::manifest::{Choices, Manifest};
 use peridot_sync::recovery;
-use peridot_sync::signer::{IdentitySigner, LocalSigner};
+use peridot_sync::signer::{IdentitySigner, LocalSigner, SignerAuth};
 use peridot_sync::sync::{Offer, valid_name, valid_plugin_id, valid_source};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -1476,7 +1476,12 @@ async fn fetch_identity(
         )),
     };
     let relays = opal_kit::relays::parse_urls(&app.config.read().await.relays);
-    let client = Client::default();
+    // The root is the identity's own event, and a relay that wants a login
+    // before it reads gets one from the identity here: the sync secret,
+    // whose key logs in everywhere else, is what this lookup is for.
+    let client = Client::builder()
+        .authenticator(SignerAuth(signer.clone()))
+        .build();
     for r in &relays {
         let _ = client.add_relay(r).await;
     }
@@ -1488,24 +1493,39 @@ async fn fetch_identity(
         .author(pubkey)
         .kind(Kind::Custom(peridot_sync::DATA_KIND))
         .identifier(Identity::root_name(&pubkey));
-    let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
-        .iter()
-        .map(|r| (r.clone(), vec![filter.clone()]))
-        .collect();
-    let connected = client
-        .relays()
-        .await
-        .values()
-        .any(|r| r.status().is_connected());
-    let events = client
-        .fetch_events(targets)
-        .timeout(Duration::from_secs(15))
-        .await;
+    // Relay by relay: asked as one, the client keeps quiet about a relay
+    // that refused (a login it couldn't give, say) and hands back what the
+    // others had, which would read as "nothing there" and start a fresh
+    // secret over the real one. Only a relay that answered counts.
+    let mut lookups = Vec::new();
+    for r in &relays {
+        let Ok(Some(relay)) = client.relay(r).await else {
+            continue;
+        };
+        let filter = filter.clone();
+        lookups.push(async move {
+            relay
+                .fetch_events(filter)
+                .timeout(Duration::from_secs(15))
+                .await
+        });
+    }
+    let results = futures::future::join_all(lookups).await;
     client.shutdown().await;
-    if !connected {
+    let mut answered = false;
+    let mut events = Vec::new();
+    for r in results {
+        match r {
+            Ok(found) => {
+                answered = true;
+                events.extend(found);
+            }
+            Err(e) => tracing::warn!("a sync server didn't answer the settings lookup: {e}"),
+        }
+    }
+    if !answered {
         bail!("couldn't reach your sync servers; check your connection and try again");
     }
-    let events = events?;
     let Some(root) = events.iter().max_by_key(|e| e.created_at) else {
         return Ok(None);
     };

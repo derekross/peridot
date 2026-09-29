@@ -28,14 +28,17 @@ use zeroize::Zeroizing;
 /// How Peridot introduces itself to Opal.
 pub const APP_KEY: &str = "peridot";
 pub const APP_NAME: &str = "Peridot";
-/// The event kinds Peridot signs: its synced data (NIP-78), relay logins
-/// (NIP-42), Blossom upload/delete authorizations (private links), and the
-/// Gallery's public events: a profile, your follow list, taking something
-/// back, seals for private messages, likes, reviews, listings and setups.
+/// The event kinds Peridot signs: its synced data (NIP-78), a relay login
+/// (NIP-42) for the one lookup that happens before the sync secret is
+/// known (finding the root event at setup; the epoch's own key logs in
+/// everywhere else), Blossom upload/delete authorizations (private links),
+/// and the Gallery's public events: a profile, your follow list, taking
+/// something back, seals for private messages, likes, reviews, listings
+/// and setups.
 pub const KINDS: [u16; 12] = [30078, 22242, 24242, 0, 3, 5, 7, 13, 17, 1111, 1985, 30490];
-/// What syncing alone needs: data, relay logins, upload authorizations.
-/// The rest is declared once you open the Gallery (Opal asks again then),
-/// so a sync-only Peridot can't be made to post as you.
+/// What syncing alone needs: data, the setup-time relay login, upload
+/// authorizations. The rest is declared once you open the Gallery (Opal
+/// asks again then), so a sync-only Peridot can't be made to post as you.
 pub const SYNC_KINDS: [u16; 3] = [30078, 22242, 24242];
 /// Kinds Opal treats as sensitive: it asks each time unless you allowed it
 /// for a while, so the panel says "look at Opal".

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use nostr_sdk::prelude::MockRelay;
+use nostr_sdk::prelude::{LocalRelay, LocalRelayBuilderNip42, MockRelay};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -158,6 +158,20 @@ async fn mock_relay() -> MockRelay {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     panic!("no free port for a mock relay");
+}
+
+/// A local relay that demands a NIP-42 login before it reads or writes.
+async fn login_relay() -> LocalRelay {
+    for _ in 0..10 {
+        let relay = LocalRelay::builder()
+            .nip42(LocalRelayBuilderNip42::read_and_write())
+            .build();
+        if relay.run().await.is_ok() {
+            return relay;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("no free port for a login relay");
 }
 
 /// Poll until `check` passes (or fail after `secs`).
@@ -413,6 +427,8 @@ struct FakeOpal {
     token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     connects: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     signs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Relay logins (kind 22242) asked of Opal.
+    logins: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _dir: tempfile::TempDir,
 }
 
@@ -428,6 +444,7 @@ impl FakeOpal {
         let token = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
         let connects = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let signs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let logins = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let accounts = std::sync::Arc::new(std::sync::Mutex::new(vec![keys.clone()]));
         let paired_key = std::sync::Arc::new(std::sync::Mutex::new(None::<Keys>));
         // How many kinds the last pairing declared (3 = sync only).
@@ -441,6 +458,7 @@ impl FakeOpal {
             token.clone(),
             connects.clone(),
             signs.clone(),
+            logins.clone(),
             accounts.clone(),
             paired_key.clone(),
             declared_kinds.clone(),
@@ -458,6 +476,7 @@ impl FakeOpal {
                     token,
                     connects,
                     signs,
+                    logins,
                     accounts,
                     paired_key,
                     declared_kinds,
@@ -552,6 +571,9 @@ impl FakeOpal {
                                     Err("user rejected".into())
                                 } else {
                                     signs.fetch_add(1, Ordering::SeqCst);
+                                    if kind == 22242 {
+                                        logins.fetch_add(1, Ordering::SeqCst);
+                                    }
                                     Ok(json!(k.sign_event(unsigned).unwrap()))
                                 }
                             }
@@ -609,6 +631,7 @@ impl FakeOpal {
             token,
             connects,
             signs,
+            logins,
             accounts,
             _dir: dir,
         }
@@ -642,6 +665,11 @@ impl FakeOpal {
 
     fn signs(&self) -> usize {
         self.signs.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Relay logins (kind 22242) Opal was asked to sign.
+    fn logins(&self) -> usize {
+        self.logins.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -1103,6 +1131,54 @@ async fn a_revoked_opal_pairing_is_retried_once_then_asks_you() {
     .await;
     assert_eq!(opal.connects(), 3);
     assert_eq!(s["opal"]["needs_pairing"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn relay_logins_are_signed_by_the_epoch_key() {
+    // A relay that wants a login for reading and writing alike. The fake
+    // Opal no longer declares kind 22242, so a login asked of it fails
+    // loudly: syncing here at all proves the epoch's key signed the login,
+    // and the identity-signed root event still went through that session.
+    let relay = login_relay().await;
+    let url = relay.url().await.to_string();
+    let opal = FakeOpal::start("Derek").await;
+    let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
+    desk.call("setup.use_opal", json!({})).await;
+    desk.write(".config/kitty/kitty.conf", "font_size 13");
+    let s = until(&desk, 20, "synced through a login-only relay", |s| {
+        s["counts"]["in_sync"] == json!(1) && s["error"].is_null()
+    })
+    .await;
+    assert_eq!(s["opal"]["paired"], json!(true), "{s}");
+    assert!(opal.signs() >= 1, "the root event was signed by Opal");
+    // One login through Opal: the root lookup at setup, before the sync
+    // secret existed. The engine's own logins are the epoch key's.
+    assert_eq!(opal.logins(), 1);
+
+    // A computer that holds the key itself logs in the same way, and reads
+    // what the first one wrote (reads need the login here too).
+    let laptop = Daemon::start(&url, "Laptop").await;
+    laptop
+        .call(
+            "setup.import",
+            json!({"secret": opal.keys.secret_key().to_secret_hex()}),
+        )
+        .await;
+    let s = until(&laptop, 30, "joined and read the change", |s| {
+        s["set_up"] == json!(true) && s["counts"]["incoming"] == json!(1)
+    })
+    .await;
+    assert_eq!(s["identity"]["epoch"], json!(1), "{s}");
+    assert_eq!(s["identity"]["mode"], json!("local"), "{s}");
+    laptop
+        .call("apply", json!({"paths": [".config/kitty/kitty.conf"]}))
+        .await;
+    assert_eq!(
+        laptop.read(".config/kitty/kitty.conf").unwrap(),
+        "font_size 13"
+    );
+    assert_eq!(opal.logins(), 1, "syncing never logged in through Opal");
+    relay.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]

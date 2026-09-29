@@ -137,15 +137,20 @@ async fn run(app: Arc<App>, engine: Arc<SyncEngine>, fresh: bool) -> anyhow::Res
         .as_secs()
         .saturating_sub(peridot_sync::sync::CATCH_UP_MARGIN);
     let relays = engine.relays().await;
-    let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
-        .iter()
-        .map(|r| (r.clone(), vec![engine.filter(since)]))
-        .collect();
-    engine
-        .client()
-        .subscribe(targets)
-        .with_id(SubscriptionId::new(SUB_ID))
-        .await?;
+    // One subscription per author (see `SyncEngine::filters`): a relay
+    // that serves only its logged-in author keeps the epoch's own open
+    // and closes the others, which other relays carry.
+    for (i, filter) in engine.filters(since).into_iter().enumerate() {
+        let targets: Vec<(RelayUrl, Vec<Filter>)> = relays
+            .iter()
+            .map(|r| (r.clone(), vec![filter.clone()]))
+            .collect();
+        engine
+            .client()
+            .subscribe(targets)
+            .with_id(SubscriptionId::new(format!("{SUB_ID}-{i}")))
+            .await?;
+    }
 
     let (fs_tx, mut fs_rx) = mpsc::unbounded_channel::<()>();
     let mut watcher = watch(&engine, fs_tx.clone()).await;
