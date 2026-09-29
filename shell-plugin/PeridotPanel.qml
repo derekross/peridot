@@ -112,6 +112,7 @@ Item {
               text: {
                 if (!root.up) return "Not running"
                 var s = root.svc
+                if (s.waitingKeyring) return "Waiting for your keyring"
                 if (!s.setUp) return "Keep your Omarchy computers matching"
                 var id = s.status.identity || {}
                 var who = id.name || U.shortKey(id.npub || "")
@@ -275,10 +276,22 @@ Item {
           urgent: root.urgent
         }
 
+        // ── The keyring is still locked ───────────────────────────
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          wrapMode: Text.Wrap
+          visible: root.up && root.svc.waitingKeyring
+          color: root.dim
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+          text: (root.svc.status.error || "Waiting for your keyring") + ". Peridot keeps trying, and syncing starts on its own once it can read its keys."
+        }
+
         // ── Not set up yet ────────────────────────────────────────
         WelcomeView {
           width: parent.width
-          visible: root.up && !root.svc.setUp && !root.svc.pairing
+          visible: root.up && !root.svc.setUp && !root.svc.waitingKeyring && !root.svc.pairing
           svc: root.svc
           foreground: root.foreground
           urgent: root.urgent

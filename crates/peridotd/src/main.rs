@@ -126,9 +126,13 @@ async fn main() -> Result<()> {
             false
         }
     };
-    if sandbox_ok && let Err(e) = app.resume().await {
-        tracing::warn!("couldn't start syncing: {e:#}");
-        app.set_error(Some(e.to_string())).await;
+    if sandbox_ok {
+        // Serve the socket meanwhile: a locked keyring is waited for, and
+        // the panel should say so rather than find nobody listening.
+        tokio::spawn({
+            let app = app.clone();
+            async move { app.resume_when_unlocked().await }
+        });
     }
 
     let socket = args.socket.unwrap_or_else(|| DIRS.socket_path());

@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nostr_sdk::prelude::*;
 use opal_core::db::Db;
@@ -68,6 +69,10 @@ pub struct App {
     pub nudge: Notify,
     pub last_sync: AtomicU64,
     pub last_error: RwLock<Option<String>>,
+    /// The keyring was locked when the daemon started (at login it can be
+    /// up before the keyring is unlocked), so whether this computer is set
+    /// up isn't known yet; [`App::resume_when_unlocked`] keeps trying.
+    pub waiting_keyring: AtomicBool,
 }
 
 impl App {
@@ -101,6 +106,7 @@ impl App {
             nudge: Notify::new(),
             last_sync: AtomicU64::new(0),
             last_error: RwLock::new(None),
+            waiting_keyring: AtomicBool::new(false),
         });
         tokio::spawn(watch_opal(Arc::downgrade(&app)));
         app
@@ -144,9 +150,53 @@ impl App {
         identity.via_opal_mode().then(|| identity.pubkey())
     }
 
-    /// Start syncing if this computer is already set up.
-    pub async fn resume(self: &Arc<Self>) -> anyhow::Result<()> {
-        if let Some(identity) = Identity::load(&self.secrets).await? {
+    /// Start syncing if this computer is already set up. Whether it is
+    /// can only be told by the keyring, and at login the daemon can be up
+    /// before the keyring is (the login keyring still locked, or the Secret
+    /// Service still starting). A keyring that can't be read is not "nothing
+    /// is set up": the welcome screen would offer to start fresh over an
+    /// identity that is there. So the panel says the keyring is being waited
+    /// for, and the read repeats, soon at first and then every half minute,
+    /// until it answers one way or the other.
+    pub async fn resume_when_unlocked(self: &Arc<Self>) {
+        let mut wait = Duration::from_secs(2);
+        loop {
+            let identity = match Identity::load(&self.secrets).await {
+                Ok(identity) => identity,
+                Err(e) => {
+                    let message = if keyring_locked(&e) {
+                        KEYRING_LOCKED.to_string()
+                    } else {
+                        format!("Couldn't read Peridot's keys from your keyring: {e:#}")
+                    };
+                    if !self.waiting_keyring.swap(true, Ordering::Relaxed) {
+                        tracing::info!("{message}; trying again");
+                    }
+                    if self.last_error.read().await.as_deref() != Some(&message) {
+                        self.set_error(Some(message)).await;
+                        self.emit_state().await;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            };
+            if self.waiting_keyring.swap(false, Ordering::Relaxed) {
+                tracing::info!("the keyring answered");
+                self.set_error(None).await;
+            }
+            if let Err(e) = self.resume(identity).await {
+                tracing::warn!("couldn't start syncing: {e:#}");
+                self.set_error(Some(e.to_string())).await;
+            }
+            self.emit_state().await;
+            return;
+        }
+    }
+
+    /// Start syncing with the identity this computer has, if any.
+    pub async fn resume(self: &Arc<Self>, identity: Option<Identity>) -> anyhow::Result<()> {
+        if let Some(identity) = identity {
             if identity.via_opal_mode() {
                 // A token from before; Opal may have revoked it meanwhile
                 // (or not be up yet, which the first request sorts out).
@@ -511,6 +561,7 @@ impl App {
             "pairing": pairing,
             "approvals": self.approvals.list(),
             "error": *self.last_error.read().await,
+            "waiting_keyring": self.waiting_keyring.load(Ordering::Relaxed),
         });
         let opal = self.opal.view();
         let Some(engine) = self.engine.read().await.clone() else {
@@ -618,6 +669,16 @@ impl App {
     }
 }
 
+/// What the panel and `peridot status` say while the keyring is locked.
+pub const KEYRING_LOCKED: &str = "Waiting for your keyring to unlock";
+
+/// The Secret Service answered, but the keyring is locked. Anything else
+/// (no identity stored, a broken item, no keyring at all) is not this.
+pub fn keyring_locked(e: &anyhow::Error) -> bool {
+    e.chain()
+        .any(|c| c.to_string().contains("org.freedesktop.Secret.Error.IsLocked"))
+}
+
 /// Follows the pairing: re-emits state when it changes, and when Opal
 /// stops accepting the token, tries to pair again once (you chose Opal, and
 /// its prompt is the designed way to say yes). If that doesn't go through,
@@ -635,5 +696,23 @@ async fn watch_opal(app: std::sync::Weak<App>) {
             continue;
         }
         app.emit_state().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keyring_locked;
+
+    #[test]
+    fn a_locked_keyring_is_told_apart_from_other_failures() {
+        let locked = anyhow::anyhow!(
+            "DBus error service error org.freedesktop.Secret.Error.IsLocked: Cannot get secret of a locked object"
+        )
+        .context("keyring");
+        assert!(keyring_locked(&locked));
+        assert!(!keyring_locked(&anyhow::anyhow!(
+            "the keyring has a Peridot identity but no sync secret"
+        )));
+        assert!(!keyring_locked(&anyhow::anyhow!("no server reachable")));
     }
 }

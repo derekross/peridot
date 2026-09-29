@@ -22,6 +22,9 @@ Item {
   // Daemon state (see peridotd `status`).
   property var status: ({})
   readonly property bool setUp: status.set_up === true
+  // The daemon started before the keyring was unlocked and is waiting for
+  // it: not set up yet as far as it can tell, but not a first run either.
+  readonly property bool waitingKeyring: status.waiting_keyring === true
   readonly property var counts: status.counts || ({})
   readonly property var files: status.files || []
   readonly property var offers: status.offers || []

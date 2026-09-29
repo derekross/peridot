@@ -1387,6 +1387,11 @@ fn last_screenshot() -> Option<PathBuf> {
 }
 
 fn print_status(s: &Value) {
+    if s["waiting_keyring"] == json!(true) {
+        println!("{}.", s["error"].as_str().unwrap_or("Waiting for your keyring"));
+        println!("  Peridot keeps trying, and starts syncing on its own once it can read its keys.");
+        return;
+    }
     if s["set_up"] != json!(true) {
         println!("Peridot isn't set up on this computer.");
         println!("  First computer:            peridot start");
