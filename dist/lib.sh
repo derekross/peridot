@@ -725,6 +725,10 @@ pinned_release() {
     [[ $h == \#* || -z $a ]] && continue
     [[ $a == "$1" && $h =~ ^[0-9a-f]{64}$ && $z =~ ^[0-9]+$ ]] && { printf '%s %s %s\n' "$h" "$c" "$z"; return 0; }
   done <"$RELEASE_CHECKSUMS"
+  # Nothing matched: say so with an empty result, not with the loop's
+  # status (the last failed comparison), which under set -e would end the
+  # caller silently before it can explain.
+  return 0
 }
 # verify_pinned <file> <asset>: 0 if the file is exactly the pinned bytes
 # (size first, so an oversized file is never even hashed).
