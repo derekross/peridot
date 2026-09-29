@@ -3,8 +3,8 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use nostr_sdk::prelude::*;
 use opal_core::db::Db;
@@ -675,8 +675,10 @@ pub const KEYRING_LOCKED: &str = "Waiting for your keyring to unlock";
 /// The Secret Service answered, but the keyring is locked. Anything else
 /// (no identity stored, a broken item, no keyring at all) is not this.
 pub fn keyring_locked(e: &anyhow::Error) -> bool {
-    e.chain()
-        .any(|c| c.to_string().contains("org.freedesktop.Secret.Error.IsLocked"))
+    e.chain().any(|c| {
+        c.to_string()
+            .contains("org.freedesktop.Secret.Error.IsLocked")
+    })
 }
 
 /// Follows the pairing: re-emits state when it changes, and when Opal
