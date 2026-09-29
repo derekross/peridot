@@ -155,43 +155,63 @@ impl App {
     /// before the keyring is (the login keyring still locked, or the Secret
     /// Service still starting). A keyring that can't be read is not "nothing
     /// is set up": the welcome screen would offer to start fresh over an
-    /// identity that is there. So the panel says the keyring is being waited
-    /// for, and the read repeats, soon at first and then every half minute,
-    /// until it answers one way or the other.
+    /// identity that is there. So the first read happens here, before the
+    /// socket is served; if the keyring didn't answer, the panel says it is
+    /// being waited for and the read repeats in the background, soon at
+    /// first and then every half minute, until it answers one way or the
+    /// other.
     pub async fn resume_when_unlocked(self: &Arc<Self>) {
-        let mut wait = Duration::from_secs(2);
-        loop {
-            let identity = match Identity::load(&self.secrets).await {
-                Ok(identity) => identity,
-                Err(e) => {
-                    let message = if keyring_locked(&e) {
-                        KEYRING_LOCKED.to_string()
-                    } else {
-                        format!("Couldn't read Peridot's keys from your keyring: {e:#}")
-                    };
-                    if !self.waiting_keyring.swap(true, Ordering::Relaxed) {
-                        tracing::info!("{message}; trying again");
-                    }
-                    if self.last_error.read().await.as_deref() != Some(&message) {
-                        self.set_error(Some(message)).await;
-                        self.emit_state().await;
-                    }
-                    tokio::time::sleep(wait).await;
-                    wait = (wait * 2).min(Duration::from_secs(30));
-                    continue;
-                }
-            };
-            if self.waiting_keyring.swap(false, Ordering::Relaxed) {
-                tracing::info!("the keyring answered");
-                self.set_error(None).await;
-            }
-            if let Err(e) = self.resume(identity).await {
-                tracing::warn!("couldn't start syncing: {e:#}");
-                self.set_error(Some(e.to_string())).await;
-            }
-            self.emit_state().await;
+        if self.try_resume().await {
             return;
         }
+        let app = self.clone();
+        tokio::spawn(async move {
+            let mut wait = Duration::from_secs(2);
+            loop {
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(Duration::from_secs(30));
+                if app.try_resume().await {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// One read of the keyring: true when it answered (set up or not),
+    /// false when it must be asked again.
+    async fn try_resume(self: &Arc<Self>) -> bool {
+        let identity = match Identity::load(&self.secrets).await {
+            Ok(identity) => identity,
+            Err(e) => {
+                let message = if keyring_locked(&e) {
+                    KEYRING_LOCKED.to_string()
+                } else {
+                    format!("Couldn't read Peridot's keys from your keyring: {e:#}")
+                };
+                if !self.waiting_keyring.swap(true, Ordering::Relaxed) {
+                    tracing::info!("{message}; trying again");
+                }
+                if self.last_error.read().await.as_deref() != Some(&message) {
+                    self.set_error(Some(message)).await;
+                    self.emit_state().await;
+                }
+                return false;
+            }
+        };
+        if self.waiting_keyring.swap(false, Ordering::Relaxed) {
+            tracing::info!("the keyring answered");
+            self.set_error(None).await;
+        }
+        // Set up over the socket while the keyring was being waited for:
+        // that engine stands, this read has nothing to add.
+        if self.engine.read().await.is_none()
+            && let Err(e) = self.resume(identity).await
+        {
+            tracing::warn!("couldn't start syncing: {e:#}");
+            self.set_error(Some(e.to_string())).await;
+        }
+        self.emit_state().await;
+        true
     }
 
     /// Start syncing with the identity this computer has, if any.

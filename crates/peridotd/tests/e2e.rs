@@ -1074,8 +1074,12 @@ async fn a_revoked_opal_pairing_is_retried_once_then_asks_you() {
     opal.set_answer(Answer::Deny);
     opal.revoke();
     let _ = c.call("sync.rotate", json!(null)).await;
+    // "Needs pairing" shows while the automatic try is still asking; wait
+    // for its answer, which a slow machine takes a moment to give.
     let s = until(&desk, 30, "needs pairing", |s| {
         s["opal"]["needs_pairing"] == json!(true)
+            && s["opal"]["waiting_approval"] == json!(false)
+            && s["opal"]["pair_error"].is_string()
             && s["error"]
                 .as_str()
                 .is_some_and(|e| e.contains("Pair Peridot with Opal"))
@@ -1108,12 +1112,26 @@ async fn a_refused_opal_signature_keeps_the_change_and_stops_asking() {
     let opal = FakeOpal::start("Derek").await;
     let desk = Daemon::start_with(&url, "Desk", Some(&opal.socket)).await;
     desk.call("setup.use_opal", json!({})).await;
+    // Setting up publishes the root event through Opal; let that land
+    // first, or a slow machine has it still in flight when the answer
+    // changes below and nothing is left for Opal to refuse.
     until(&desk, 20, "set up", |s| s["set_up"] == json!(true)).await;
+    for _ in 0..200 {
+        if opal.signs() >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(opal.signs() >= 1, "the root event was signed at setup");
+    until(&desk, 20, "published", |s| s["waiting_to_send"] == json!(0)).await;
 
     opal.set_answer(Answer::Deny);
     desk.write(".config/kitty/kitty.conf", "font_size 13");
     // The change itself syncs (the epoch's key signs it); the root event,
-    // which Opal signs, is refused and held.
+    // which Opal signs, is refused and held. A rotation is what publishes
+    // a root event now that the first one is out.
+    let mut c = crate::Client::open(&desk.socket).await;
+    let _ = c.call("sync.rotate", json!(null)).await;
     let s = until(&desk, 20, "held after a no", |s| {
         s["counts"]["in_sync"] == json!(1)
             && s["error"]
