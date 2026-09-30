@@ -448,7 +448,7 @@ Column {
     color: root.dim
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
-    text: "Loading the catalogues…"
+    text: "Loading the catalogs…"
   }
   Text {
     textFormat: Text.PlainText
@@ -728,7 +728,7 @@ Column {
         label: modelData.title + (modelData.kind === "theme" ? " theme" : "")
         description: !modelData.url ? "No public source, so it can't be shared"
           : modelData.how === "linked" ? modelData.url + " · a linked checkout (one you develop?)"
-          : modelData.how === "catalogue" ? modelData.url + " · from the catalogue"
+          : modelData.how === "catalogue" ? modelData.url + " · from the catalog"
           : modelData.url
         checked: root.candidateOn(modelData)
         foreground: root.foreground

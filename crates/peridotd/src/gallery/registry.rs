@@ -60,7 +60,7 @@ async fn fetch_capped(
 ) -> anyhow::Result<Option<(Vec<u8>, Option<String>)>> {
     anyhow::ensure!(
         allowed_url(url),
-        "{url}: catalogues are read over https only"
+        "{url}: catalogs are read over https only"
     );
     let mut req = http.get(url).header("Accept", "application/json");
     if let Some(e) = etag {

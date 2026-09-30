@@ -715,7 +715,7 @@ async fn run() -> Result<()> {
                 let s = c.call("status", json!(null)).await?;
                 let g = &s["gallery"];
                 if g["themes"].as_u64().unwrap_or(0) + g["plugins"].as_u64().unwrap_or(0) == 0 {
-                    println!("The catalogues haven't loaded yet; try again in a moment.");
+                    println!("The catalogs haven't loaded yet; try again in a moment.");
                 } else {
                     println!("Nothing matches.");
                 }
@@ -851,7 +851,7 @@ async fn run() -> Result<()> {
                     Some(url) => {
                         let how = match cand["how"].as_str() {
                             Some("linked") => "  (a linked checkout)",
-                            Some("catalogue") => "  (from the catalogue)",
+                            Some("catalogue") => "  (from the catalog)",
                             _ => "",
                         };
                         println!("  {name} ({kind})  {url}{how}");

@@ -193,10 +193,10 @@ impl Gallery {
                 continue;
             }
             match registry::refresh(&self.http, &self.store, source, url, now).await {
-                Ok(n) if n > 0 => tracing::info!("gallery: {n} {source} from the catalogue"),
+                Ok(n) if n > 0 => tracing::info!("gallery: {n} {source} from the catalog"),
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::warn!("gallery: couldn't read the {source} catalogue: {e:#}");
+                    tracing::warn!("gallery: couldn't read the {source} catalog: {e:#}");
                     errors.push(format!("{source}: {e}"));
                 }
             }
@@ -205,7 +205,7 @@ impl Gallery {
             self.store.set_meta("schema", REGISTRY_SCHEMA)?;
             Ok(())
         } else {
-            bail!("couldn't read the catalogues ({})", errors.join("; "))
+            bail!("couldn't read the catalogs ({})", errors.join("; "))
         }
     }
 
