@@ -14,7 +14,7 @@
 - **Recovery kit.** A page to print or save, plus six words to write down. If you lose every computer, they bring everything back.
 - **Undo.** Put back what a computer had before an apply. It stays on that computer only; your others keep theirs.
 - **Private links.** Share a file, the clipboard or your last screenshot as a link: `peridot share`, the Links tab, or Omarchy's menu → Share → Private link. The file is encrypted on your computer; the link carries the key after the `#`, which browsers never send to a server; the viewer at myperidot.app decrypts it in the browser. Links expire (7 days by default) and can be removed any time. A link can also go straight to someone as a private message (`peridot share --to name@domain`, or "Send to…" on a link): only they can read it, and the servers don't learn who wrote to whom.
-- **The Gallery.** Themes and plugins from the community catalogues ([plugins.omarchy.org](https://plugins.omarchy.org) and [omarchytheme.com](https://omarchytheme.com)) with real likes and reviews from other Omarchy users, ranked by people you follow. Like, review and install in a click; publish your own setup (your theme plus the themes and plugins you installed) so someone else can install the lot in one go; put a theme or plugin nobody has listed yet on the map. Pick a name the first time, and that's all anyone ever sees of you.
+- **The Gallery.** Themes and plugins from the community catalogs ([plugins.omarchy.org](https://plugins.omarchy.org) and [omarchytheme.com](https://omarchytheme.com)) with real likes and reviews from other Omarchy users, ranked by people you follow. Like, review and install in a click; publish your own setup (your theme plus the themes and plugins you installed) so someone else can install the lot in one go; put a theme or plugin nobody has listed yet on the map. Pick a name the first time, and that's all anyone ever sees of you.
 - **Your identity, your way.** Start with a new key, bring one you already have, or, if [Opal](https://github.com/derekross/opal) is installed, use your Opal identity: you approve Peridot once in Opal, Peridot never sees the key, and Opal signs for it under its own rules and logs every use. Started with a new key and installed Opal later? Settings → "Move it into Opal" hands the key over (a one-time code for Opal's Add account, six words as its password); Opal holds it from then on and Peridot carries on with the same identity and sync. Settings also shows your npub and a QR code, and opens your profile in the browser.
 
 ## What syncs
@@ -76,7 +76,7 @@ omarchy plugin update derekross.peridot
 ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh
 ```
 
-Updating keeps your identity and settings. The unit and plugin files from any earlier version are recognised by their release hashes and replaced; a file you edited stays, the output says so, and Peridot's version of it isn't installed. The service is enabled on first install only; an update restarts it if it is running Peridot's binary, and never re-enables one you disabled.
+Updating keeps your identity and settings. The unit and plugin files from any earlier version are recognized by their release hashes and replaced; a file you edited stays, the output says so, and Peridot's version of it isn't installed. The service is enabled on first install only; an update restarts it if it is running Peridot's binary, and never re-enables one you disabled.
 
 ## Remove
 

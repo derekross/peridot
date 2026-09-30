@@ -4,16 +4,428 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Peridot</title>
-<link rel="stylesheet" href="s/viewer.css">
+<meta name="description" content="Own your settings. Peridot keeps every Omarchy computer you own matching, backs your setup up where no one can read it, and restores it anywhere from six words. No account, no cloud.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800;1,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ground: #080b07;
+  --surface: #10160f;
+  --rule: #223020;
+  --ink: #dbe6cd;
+  --dim: #8b9c7f;
+  --gem: #b8d848;
+  --olive: #6d8a1f;
+  --warn: #ff5c7a;
+  --glow: rgba(184, 216, 72, 0.10);
+}
+* { box-sizing: border-box; }
+html { background: var(--ground); scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; color: var(--ink); background: var(--ground);
+  font-family: "JetBrains Mono", ui-monospace, "Cascadia Mono", monospace;
+  font-size: 1rem; line-height: 1.65; -webkit-font-smoothing: antialiased;
+}
+a { color: var(--gem); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--ink); }
+:focus-visible { outline: 2px solid var(--gem); outline-offset: 3px; }
+code, kbd { font-family: inherit; }
+p, li { max-width: 62ch; }
+h1, h2, h3 { margin: 0; line-height: 1.08; letter-spacing: -0.025em; }
+h2 { font-size: clamp(1.7rem, 3.6vw, 2.6rem); font-weight: 800; max-width: 22ch; }
+h3 { font-size: 1.05rem; font-weight: 700; margin-bottom: .4rem; }
+.wrap { width: min(74rem, 100% - 2.5rem); margin-inline: auto; }
+.split > *, .hero > * { min-width: 0; }
+
+header.top { display: flex; align-items: center; justify-content: space-between; padding: 1.4rem 0; }
+.mark { display: inline-flex; align-items: center; gap: .6rem; color: var(--ink); text-decoration: none; font-weight: 700; }
+.mark svg { width: 22px; height: 22px; }
+nav a { color: var(--dim); text-decoration: none; margin-left: 1.4rem; font-size: .92rem; }
+nav a:hover { color: var(--gem); }
+@media (max-width: 40rem) { nav a { margin-left: .9rem; } nav a.hide-sm { display: none; } }
+
+/* ── hero: the manifesto ── */
+.hero { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 3.5rem; align-items: center; padding: 3.5rem 0 5rem; position: relative; }
+@media (max-width: 60rem) { .hero { grid-template-columns: 1fr; padding-top: 1.5rem; gap: 2.5rem; } }
+h1 { font-size: clamp(2.6rem, 6.4vw, 5.2rem); font-weight: 800; letter-spacing: -0.04em; max-width: 11ch; }
+h1 .gem { color: var(--gem); }
+.lede { font-size: 1.12rem; margin: 1.6rem 0 2rem; }
+.install { display: flex; max-width: 42rem; border: 1px solid var(--rule); background: var(--surface); border-radius: 6px; overflow: hidden; }
+.install pre { margin: 0; padding: .9rem 1rem; font-size: .88rem; flex: 1; min-width: 0; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.install pre span, pre.cmd span { color: var(--dim); }
+.install button { font: inherit; font-size: .85rem; color: var(--ground); background: var(--gem); border: 0; padding: 0 1.1rem; cursor: pointer; font-weight: 700; }
+.install button:hover { background: var(--ink); }
+.after { color: var(--dim); font-size: .9rem; margin-top: .9rem; }
+
+.win { min-width: 0; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); box-shadow: 0 30px 80px -40px var(--glow); font-size: .86rem; }
+.win .bar { display: flex; align-items: center; gap: .6rem; padding: .55rem .9rem; border-bottom: 1px solid var(--rule); color: var(--dim); }
+.win .bar b { color: var(--ink); font-weight: 500; }
+.win .bar i { margin-left: auto; font-style: normal; }
+.win .body { padding: 1rem 1.1rem; min-height: 6rem; white-space: pre-wrap; overflow-wrap: anywhere; overflow: hidden; }
+.term .body { font-size: clamp(.95rem, 1.6vw, 1.25rem); line-height: 1.7; min-height: 11.5rem; }
+.term .p { color: var(--dim); }
+.term .out { display: block; font-weight: 800; letter-spacing: -0.01em; }
+.term .out.gem { color: var(--gem); }
+.term .cur { display: inline-block; width: .6em; height: 1.1em; background: var(--gem); vertical-align: -0.15em; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.term .out, .term .cmd2 { opacity: 0; }
+.term .show { opacity: 1; }
+@media (prefers-reduced-motion: reduce) { .term .out, .term .cmd2 { opacity: 1 !important; } .term .cur { animation: none; } }
+
+/* ── sections ── */
+section { padding: 4.5rem 0; border-top: 1px solid var(--rule); }
+.split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 3rem; align-items: start; }
+@media (max-width: 60rem) { .split { grid-template-columns: 1fr; gap: 2rem; } }
+p.q { color: var(--dim); }
+.big { font-size: 1.15rem; }
+
+/* the rented web */
+.rented { padding: 4.5rem 0; border-top: 1px solid var(--rule); }
+.notices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; margin: 1.8rem 0 2.2rem; }
+@media (max-width: 60rem) { .notices { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 40rem) { .notices { grid-template-columns: 1fr; } }
+.notice { border: 1px solid rgba(255, 92, 122, .35); color: var(--warn); padding: .8rem 1rem; font-size: .9rem; border-radius: 4px; background: rgba(255, 92, 122, .04); }
+.notice small { display: block; color: var(--dim); font-size: .78rem; margin-top: .3rem; }
+.counter { font-size: clamp(1.4rem, 3vw, 2.2rem); font-weight: 800; letter-spacing: -0.02em; max-width: 30ch; line-height: 1.2; }
+.counter .gem { color: var(--gem); }
+
+/* the sync moment */
+.demo { display: grid; gap: 1.1rem; position: relative; min-width: 0; }
+.win .ln { color: var(--dim); display: inline-block; width: 3.5ch; }
+.win .hot { background: var(--glow); box-shadow: inset 3px 0 0 var(--gem); padding: .15em .4em .15em .55em; margin-left: -.2em; border-radius: 3px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.win .toast { color: var(--ground); background: var(--gem); border-radius: 4px; padding: .3rem .6rem; display: inline-block; font-weight: 700; }
+.wire { display: flex; align-items: center; gap: .8rem; color: var(--dim); font-size: .78rem; padding: 0 .4rem; }
+.wire .line { flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--rule) 0 6px, transparent 6px 12px); position: relative; overflow: hidden; }
+.wire .blob { position: absolute; top: -.7rem; left: -30%; width: 30%; white-space: nowrap; color: var(--olive); opacity: 0; }
+.wire .blob.go { animation: cross 1.6s linear forwards; }
+@keyframes cross { 0% { left: -30%; opacity: 0 } 10% { opacity: 1 } 90% { opacity: 1 } 100% { left: 100%; opacity: 0 } }
+.demo .typed, .demo .toast { opacity: 0; }
+.demo .show { opacity: 1; transition: opacity .3s; }
+@media (prefers-reduced-motion: reduce) { .demo .typed, .demo .toast { opacity: 1 !important; } .wire .blob { animation: none; opacity: 1; left: 35%; } }
+
+/* backup & restore */
+.words { display: flex; flex-wrap: wrap; gap: .6rem .9rem; margin: 1.4rem 0 1rem; }
+.words span { font-size: clamp(1.3rem, 2.8vw, 2rem); font-weight: 800; color: var(--gem); letter-spacing: -0.02em; }
+.words span::before { content: counter(w) " "; counter-increment: w; color: var(--dim); font-size: .75em; font-weight: 400; }
+.words { counter-reset: w; }
+.timeline { list-style: none; padding: 0; margin: 1.4rem 0 0; display: grid; gap: .8rem; max-width: 40rem; }
+.timeline li { display: grid; grid-template-columns: 6.5rem 1fr; gap: 1rem; }
+.timeline li b { color: var(--dim); font-weight: 500; }
+
+/* what a relay sees */
+.relay-view { font-size: .8rem; line-height: 1.6; color: var(--dim); }
+.relay-view b { color: var(--ink); font-weight: 500; }
+.relay-view .k { color: var(--olive); }
+
+/* ethos */
+.ethos { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; margin-top: 2rem; }
+@media (max-width: 50rem) { .ethos { grid-template-columns: 1fr; } }
+.ethos > div { padding: 1.8rem; }
+.ethos > div + div { border-left: 1px solid var(--rule); }
+@media (max-width: 50rem) { .ethos > div + div { border-left: 0; border-top: 1px solid var(--rule); } }
+.ethos h3 { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; margin-bottom: .8rem; }
+.ethos h3 span { color: var(--dim); font-size: .95rem; font-weight: 400; display: block; letter-spacing: 0; margin-top: .2rem; }
+.meet { margin-top: 1.6rem; font-size: clamp(1.2rem, 2.4vw, 1.7rem); font-weight: 800; letter-spacing: -0.02em; max-width: 32ch; line-height: 1.25; }
+.meet .gem { color: var(--gem); }
+
+ul.plain { list-style: none; padding: 0; margin: 1.2rem 0 0; display: grid; gap: .9rem; }
+ul.plain li { padding-left: 1.4rem; position: relative; }
+ul.plain li::before { content: ""; position: absolute; left: 0; top: .62rem; width: .55rem; height: .55rem; background: var(--gem); transform: rotate(45deg); }
+ol.steps { list-style: none; padding: 0; margin: 1.4rem 0 0; counter-reset: step; display: grid; gap: 1.1rem; }
+ol.steps li { counter-increment: step; display: grid; grid-template-columns: 2.4rem 1fr; gap: .6rem; }
+ol.steps li::before { content: counter(step); color: var(--gem); font-weight: 800; font-size: 1.4rem; line-height: 1.2; }
+.digits { font-size: clamp(2.4rem, 7vw, 4rem); font-weight: 800; letter-spacing: .08em; color: var(--gem); margin: .2rem 0 .6rem; }
+.link-shape { word-break: break-all; font-size: .9rem; padding: .9rem 1rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+.link-shape .k { color: var(--gem); }
+.link-shape .n { color: var(--dim); }
+.tree { font-size: .84rem; line-height: 1.55; color: var(--dim); }
+.tree b { color: var(--ink); font-weight: 500; }
+.tree .never { color: var(--warn); }
+.tree .ask { color: var(--gem); }
+figure { margin: 0; }
+figure img { width: 100%; max-width: 24rem; height: auto; border: 1px solid var(--rule); border-radius: 8px; display: block; }
+figcaption { color: var(--dim); font-size: .85rem; margin-top: .6rem; max-width: 40ch; }
+.three { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2.4rem; margin-top: 1.6rem; }
+@media (max-width: 60rem) { .three { grid-template-columns: 1fr; } }
+pre.cmd { margin: 1rem 0 0; padding: 1rem 1.1rem; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); font-size: .86rem; white-space: pre-wrap; word-break: break-all; line-height: 1.6; max-width: 46rem; }
+footer { border-top: 1px solid var(--rule); padding: 2.4rem 0 3rem; color: var(--dim); font-size: .9rem; display: flex; flex-wrap: wrap; gap: 1.2rem 2rem; align-items: baseline; }
+footer a { color: var(--dim); }
+footer a:hover { color: var(--gem); }
+footer .spacer { flex: 1; }
+</style>
 </head>
 <body>
-<main>
-  <header><span class="gem" aria-hidden="true">◆</span> <span class="brand">Peridot</span></header>
-  <section class="card">
-    <h1>Keep your Omarchy computers matching.</h1>
-    <p>Your look, keyboard shortcuts, terminal, bar and menu follow you to every computer you use. No account, nothing a company can read. Private share links, too.</p>
-    <p><a href="https://github.com/derekross/peridot">Peridot on GitHub</a></p>
+<div class="wrap">
+  <header class="top">
+    <a class="mark" href="#">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 21 9l-3.4 11H6.4L3 9z" fill="none" stroke="#b8d848" stroke-width="1.8" stroke-linejoin="round"/><path d="M3 9h18M12 2l-3.4 7L12 20l3.4-11" fill="none" stroke="#b8d848" stroke-width="1.2" stroke-linejoin="round" opacity=".7"/></svg>
+      Peridot
+    </a>
+    <nav aria-label="Sections">
+      <a href="#sync">Sync</a>
+      <a href="#restore">Restore</a>
+      <a href="#privacy" class="hide-sm">Privacy</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/derekross/peridot">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero" style="border-top:0">
+    <div>
+      <h1>Own your <span class="gem">settings.</span></h1>
+      <p class="lede">You own the machine. Peridot makes sure you own what's on it: every Omarchy computer you use stays matching, your whole setup is backed up where nobody can read it, and six words bring it back on a bare install. No account. No cloud. Nothing that can change the terms on you.</p>
+      <div class="install">
+        <pre><span>$</span> omarchy plugin add https://github.com/derekross/peridot.git --enable
+<span>$</span> ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh</pre>
+        <button type="button" data-copy="omarchy plugin add https://github.com/derekross/peridot.git --enable && ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh">Copy</button>
+      </div>
+      <p class="after">Free software, for Omarchy on Arch. The installer asks before it touches anything.</p>
+    </div>
+    <div class="win term" aria-label="A terminal printing the manifesto">
+      <div class="bar"><b>ghostty</b> ~</div>
+      <div class="body"><span class="p">$</span> cat manifesto.txt
+<span class="out" id="m1">own the machine.</span><span class="out" id="m2">own the network.</span><span class="out" id="m3">rebuild the internet.</span>
+<span class="cmd2" id="m4"><span class="p">$</span> peridot</span>
+<span class="out gem" id="m5">own your settings.</span><span class="cur" aria-hidden="true"></span></div>
+    </div>
   </section>
-</main>
+
+  <section class="rented">
+    <h2>The rented web keeps your dotfiles in someone else's drawer</h2>
+    <p class="big" style="margin-top:1rem">Every other way to carry your setup between computers goes through an account: a private repo, a sync folder, a vendor's cloud. Each one comes with a login you don't control and a page like these.</p>
+    <div class="notices" aria-label="Notices from platforms">
+      <div class="notice">Your account has been suspended.<small>Appeal reviewed in 30 business days.</small></div>
+      <div class="notice">We've updated our Terms of Service.<small>Continued use means you agree.</small></div>
+      <div class="notice">Free API access ends Friday.<small>Upgrade to keep syncing.</small></div>
+      <div class="notice">Sign in to keep reading.<small>Your session has expired.</small></div>
+      <div class="notice">Your data export is not available.<small>Try again later.</small></div>
+      <div class="notice">Not available in your country.<small>We're working on it.</small></div>
+    </div>
+    <p class="counter">Peridot has no account to suspend, no terms to update, and nothing readable to hand over. <span class="gem">Your settings leave your computer encrypted, and only your computers can open them.</span></p>
+  </section>
+
+  <section id="sync">
+    <div class="split">
+      <div>
+        <h2>Change it once. It's on every computer you own.</h2>
+        <p class="big" style="margin-top:1rem">Rebind a key on the desk and the laptop offers it before you've stood up. Hyprland, the bar, the menu, your terminal, btop, starship, tmux, lazygit, mpv. Your theme, and the themes and plugins you installed.</p>
+        <p>Nothing changes on a computer until you apply it, unless you turn on automatic apply. Files that can run commands are always shown to you first. Every apply can be undone.</p>
+        <p class="q">Two computers editing the same file is a conflict, not a coin toss: Peridot keeps both and lets you choose.</p>
+      </div>
+      <div class="demo" aria-label="A change made on one computer arriving on another">
+        <div class="win">
+          <div class="bar"><b>Desk</b> ~/.config/hypr/bindings.lua <i>edited</i></div>
+          <div class="body"><span class="ln">14</span>bindd("SUPER", "return", "Terminal", "exec", "ghostty")
+<span class="ln">15</span><span class="hot typed" id="t1">bindd("SUPER", "B", "Browser", "exec", "brave")</span>
+<span class="ln">16</span>bindd("SUPER", "F", "File manager", "exec", "nautilus")</div>
+        </div>
+        <div class="wire"><span>Desk</span><span class="line"><span class="blob" id="blob">Ah+hfrFVD/uqbPBPY9uA7rn5jjNEDJkBPOwBXQI7znXF2EH0pD</span></span><span>relays</span><span class="line"><span class="blob" id="blob2">oFZJ5BjcGi+9xinbHAn6YmwmccMcubiW6bJWgdEIE6po5oOf0U</span></span><span>Laptop</span></div>
+        <div class="win">
+          <div class="bar"><b>Laptop</b> Peridot</div>
+          <div class="body"><span class="toast" id="t2">1 setting changed on Desk · Apply</span>
+
+<span class="ln">15</span><span class="typed" id="t3">bindd("SUPER", "B", "Browser", "exec", "brave")</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="restore">
+    <div class="split">
+      <div>
+        <h2>Your disk dies at 2 a.m. Your setup doesn't.</h2>
+        <p class="big" style="margin-top:1rem">Everything Peridot syncs is also your backup, encrypted, on servers that cannot read it. The recovery kit is a page to print or save, plus six words to write down.</p>
+        <div class="words" aria-label="Six recovery words"><span>canopy</span><span>glider</span><span>sulfur</span><span>mammal</span><span>dizzy</span><span>overlap</span></div>
+        <p class="q">Together, the page and the words bring every setting back. Apart, they are useless to anyone who finds one of them.</p>
+      </div>
+      <div>
+        <ol class="timeline" aria-label="Restoring on a fresh install">
+          <li><b>02:14</b><span>Disk gone. Fine.</span></li>
+          <li><b>02:20</b><span>Fresh Omarchy on the spare laptop.</span></li>
+          <li><b>02:23</b><span>Install Peridot, choose "Use my recovery kit", type six words.</span></li>
+          <li><b>02:24</b><span>Keybindings, theme, terminal, bar, plugins: offered, applied, yours again.</span></li>
+        </ol>
+        <p class="q" style="margin-top:1.4rem">Or skip the words: pair the new laptop from any computer you already use, and it gets everything from there.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="privacy">
+    <div class="split">
+      <div>
+        <h2>Own the network. It knows nothing about you.</h2>
+        <p class="big" style="margin-top:1rem">Peridot moves your settings over Nostr, an open network of servers anyone can run, including you on a homelab. Pick the relays you trust, or run your own. No relay is special, and none of them is told anything.</p>
+        <p>Every file is encrypted on your computer before it leaves. Its name is a keyed hash, its size is padded to one of four classes, its timestamp is rounded to the hour, and it is signed by a key that is not your identity. Take a relay's disk and you hold blobs that say nothing.</p>
+        <p class="q">The full protocol is public, in <a href="https://github.com/derekross/peridot/blob/main/NIP.md">NIP.md</a>, so anyone can check this rather than trust it.</p>
+      </div>
+      <div class="win">
+        <div class="bar"><b>relay.example</b> what it stores for you</div>
+        <div class="body relay-view"><b>d</b> 7c1e0f4a9b2d8e6f3a5c1b0d9e8f7a6b   <b>at</b> 14:00   <b>size</b> 4096
+<span class="k">Ah+hfrFVD/uqbPBPY9uA7rn5jjNEDJkBPOwBXQI7znXF2EH0pDoFZJ5Bj…</span>
+<b>d</b> 2a9f6c3e1d8b4a7f0e5c9d2b6a1f8e3c   <b>at</b> 14:00   <b>size</b> 1024
+<span class="k">cGi+9xinbHAn6YmwmccMcubiW6bJWgdEIE6po5oOf0UpP//yH1yis1Dh…</span>
+<b>d</b> e4b1d7a2c9f0e6b3a8d5c2f1b7e0a9d4   <b>at</b> 15:00   <b>size</b> 16384
+<span class="k">W/A4xqKU68CKetV2LUa5w5VmO2bAZ18ol3GQbWLy+uIaiZi4nMAbpDeb6M…</span>
+
+<b>author</b>  a01ed833…  (not you)
+<b>whose?</b>  unknown   <b>what?</b>  unknown   <b>how big?</b>  unknown</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="ethos">
+    <h2>Two ideas that agree</h2>
+    <div class="ethos">
+      <div>
+        <h3>Own the machine<span>Omarchy</span></h3>
+        <p>A computer you understand, configured in files you can read, with no tollbooths and no gatekeepers between you and it. Your setup is yours, down to the keybinding.</p>
+      </div>
+      <div>
+        <h3>Own the network<span>Nostr</span></h3>
+        <p>Your identity is a key you hold, not an account someone grants. Servers are interchangeable and expendable. Nobody can suspend you, and nobody can change the terms on you.</p>
+      </div>
+    </div>
+    <p class="meet">Peridot is where they meet: <span class="gem">a setup you own, carried by a network you own, readable by no one else.</span> And because your identity is a standard Nostr key, it is already yours to use anywhere else on Nostr, with <a href="https://github.com/derekross/opal">Opal</a> or any client.</p>
+  </section>
+
+  <section id="more">
+    <h2>Everything else that rides along</h2>
+    <div class="three">
+      <div>
+        <h3>Pair a new computer in a minute</h3>
+        <p>The new one shows a code. Type it on one you already use. Both screens show the same six digits, you both say yes, and it joins. Someone who glimpsed the code cannot: the digits come from a secret exchange the code only starts.</p>
+        <div class="digits" aria-hidden="true">482 917</div>
+      </div>
+      <div>
+        <h3>Private links</h3>
+        <p>Share a screenshot, a file or your clipboard from Omarchy's Share menu. Encrypted on your computer; the key rides after the <code>#</code>, the part of a link a browser never sends to a server. Links expire in a week unless you say otherwise, and can be pulled any time.</p>
+        <div class="link-shape">myperidot.app/s#1.<span class="n">a3f9…</span>.<span class="n">blossom.ditto.pub</span>.<span class="k">key</span></div>
+      </div>
+      <div>
+        <h3>The Gallery</h3>
+        <p>Every theme and plugin from the community catalogs, with likes and reviews from real Omarchy users, ranked by the people you follow. Install in a click. Publish your own setup so someone else can run it whole.</p>
+        <figure>
+          <img src="panel.png" width="664" height="800" alt="Peridot's panel on a newly paired laptop, offering the desk's settings" loading="lazy">
+        </figure>
+      </div>
+    </div>
+  </section>
+
+  <section id="what">
+    <div class="split">
+      <div>
+        <h2>What follows you, and what never does</h2>
+        <p>On by default: Hyprland settings, the bar layout, menu additions and branding, terminal configs, btop, starship, tmux, lazygit, mpv, and your theme, themes and plugins.</p>
+        <p>Off until you turn them on, because they can run commands: what starts at login, <code>.bashrc</code>, Omarchy hooks, Neovim, Git settings, default apps.</p>
+        <p class="q">Never, whatever you turn on: keys, tokens, keyrings, browser and Signal profiles, your monitor layout and input devices, and anything that looks like a secret.</p>
+      </div>
+      <div class="win">
+        <div class="bar"><b>~/.config</b> as Peridot sees it</div>
+        <div class="body tree"><b>hypr/</b>bindings.lua  looknfeel.lua  hyprland.lua
+<b>hypr/</b><span class="ask">autostart.lua</span>            ask first
+<b>hypr/</b>monitors.lua  input.lua      stays here
+<b>omarchy/</b>shell.json  extensions/  branding/
+<b>ghostty/  kitty/  alacritty/  foot/</b>
+<b>btop/  starship.toml  tmux/  lazygit/  mpv/</b>
+<b>nvim/</b>  <span class="ask">git/config</span>  <span class="ask">.bashrc</span>   ask first
+<span class="never">.ssh/  .gnupg/  keyrings/  *token*  *.pem</span>   never</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="security">
+    <div class="split">
+      <div>
+        <h2>Said plainly</h2>
+        <ul class="plain">
+          <li>Relays and file servers, even public ones, cannot read your settings or link them to you.</li>
+          <li>Someone who saw a pairing code cannot join. Both people confirm a number the code alone cannot produce.</li>
+          <li>A file that can run commands is never applied without you seeing it, and never keeps an exec bit.</li>
+          <li>A removed computer stops receiving anything new. What it already had stays with it; nothing can wipe it from afar.</li>
+          <li>The daemon runs sandboxed: your home is read-only to it except the settings it syncs, and it reaches the session bus only through a filter.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>And what no software can promise</h3>
+        <p>Code already running as you can read the keyring, the socket and the files. Whoever holds your sync secret can push settings that run commands on your other computers, which is what syncing is, so every such file is shown first. A key kept in your login keyring is exactly as safe as your login and your disk encryption; <a href="https://github.com/derekross/opal">Opal</a> takes it out of Peridot's hands entirely.</p>
+        <p class="q">Peridot is new. It works end to end, and it says so when it isn't sure. Report a problem as described in <a href="https://github.com/derekross/peridot/blob/main/SECURITY.md">SECURITY.md</a>.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="install">
+    <div class="split">
+      <div>
+        <h2>Install</h2>
+        <p>Any Omarchy on Arch. The installer records everything it writes, checks every path before it changes anything, and asks before adding Private link entries to the Share menu. Without Rust it downloads the release build and checks it against a hash pinned in the source.</p>
+        <pre class="cmd"><span>$</span> omarchy plugin add https://github.com/derekross/peridot.git --enable
+<span>$</span> ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh</pre>
+        <p class="q" style="margin-top:1rem">Needs <code>xdg-dbus-proxy</code> for the sandbox: <code>sudo pacman -S --needed xdg-dbus-proxy</code>. The installer stops and says so if it is missing.</p>
+      </div>
+      <div>
+        <h3>Update</h3>
+        <pre class="cmd"><span>$</span> omarchy plugin update derekross.peridot
+<span>$</span> ~/.config/omarchy/plugins/derekross.peridot/dist/install.sh</pre>
+        <h3 style="margin-top:1.6rem">Remove</h3>
+        <pre class="cmd"><span>$</span> ~/.config/omarchy/plugins/derekross.peridot/dist/uninstall.sh
+<span>$</span> omarchy plugin remove derekross.peridot</pre>
+        <p class="q" style="margin-top:1rem">Removing takes out only what Peridot can verify it wrote. A file you edited stays, and the output says so.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Peridot is free software, MIT licensed. Made for Omarchy; not affiliated with it.</span>
+    <a href="https://github.com/derekross/peridot">Source</a>
+    <a href="https://github.com/derekross/peridot/releases">Releases</a>
+    <a href="https://github.com/derekross/peridot/blob/main/NIP.md">Protocol</a>
+    <a href="https://github.com/derekross/opal">Opal</a>
+    <span class="spacer"></span>
+    <span>Derek Ross</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var $ = function (id) { return document.getElementById(id); };
+  // Hero: the manifesto, one line at a time.
+  var lines = ["m1", "m2", "m3", "m4", "m5"];
+  if (reduce) { lines.forEach(function (id) { $(id).classList.add("show"); }); }
+  else { lines.forEach(function (id, i) { setTimeout(function () { $(id).classList.add("show"); }, 700 + i * 650); }); }
+  // Sync demo, when it scrolls into view.
+  var demo = document.querySelector(".demo");
+  function play() {
+    var t1 = $("t1"), text = t1.textContent;
+    if (reduce) { ["t1", "t2", "t3"].forEach(function (id) { $(id).classList.add("show"); }); return; }
+    t1.textContent = ""; t1.classList.add("show");
+    var i = 0, typer = setInterval(function () {
+      t1.textContent = text.slice(0, ++i);
+      if (i >= text.length) {
+        clearInterval(typer);
+        setTimeout(function () { $("blob").classList.add("go"); }, 200);
+        setTimeout(function () { $("blob2").classList.add("go"); }, 1300);
+        setTimeout(function () { $("t2").classList.add("show"); }, 3000);
+        setTimeout(function () { $("t3").classList.add("show"); }, 3800);
+      }
+    }, 28);
+  }
+  if ("IntersectionObserver" in window && !reduce) {
+    var seen = false, io = new IntersectionObserver(function (es) {
+      es.forEach(function (e) { if (e.isIntersecting && !seen) { seen = true; play(); io.disconnect(); } });
+    }, { threshold: 0.4 });
+    io.observe(demo);
+  } else { play(); }
+  document.querySelectorAll("[data-copy]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      navigator.clipboard.writeText(btn.getAttribute("data-copy")).then(function () {
+        btn.textContent = "Copied"; setTimeout(function () { btn.textContent = "Copy"; }, 1600);
+      });
+    });
+  });
+})();
+</script>
 </body>
 </html>
