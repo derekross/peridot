@@ -35,5 +35,11 @@ fresh2; inst >/dev/null; echo "# mine" >>"$PU"; : >"$FAKE_LOG"; r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$PU" ] && said "$PU is kept: you changed it" && logged "stop peridot-dbus-proxy.service" && ok
 fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_PROXY_FRAGMENT="/etc/systemd/user/peridot-dbus-proxy.service" r=$(uninst)
 expect "left alone" [ -f "$PU" ] && said "comes from /etc/systemd/user/peridot-dbus-proxy.service" && not_logged "stop peridot-dbus-proxy.service" && ok
+case_ "5. a proxy unit edited to run something else, or to serve another socket, still naming Peridot, is left running"
+for ex in "{ path=/usr/bin/other ; argv[]=/usr/bin/other }" "{ path=/usr/bin/xdg-dbus-proxy ; argv[]=/usr/bin/xdg-dbus-proxy x /tmp/elsewhere }"; do
+  fresh2; inst >/dev/null; echo "# mine" >>"$PU"; : >"$FAKE_LOG"; FAKE_PROXY_EXECSTART="$ex" r=$(uninst)
+  expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$PU" ] && expect "not stopped ($ex)" not_logged "stop peridot-dbus-proxy.service" &&
+  said "no longer serves Peridot's bus socket" || break
+done && ok
 
 finish

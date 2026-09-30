@@ -37,5 +37,13 @@ fresh2; inst >/dev/null; echo "# mine" >>"$SU"; : >"$FAKE_LOG"; r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$SU" ] && said "$SU is kept: you changed it" && logged "stop peridot-install.socket" && ok
 fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_SOCKET_FRAGMENT="/etc/systemd/user/peridot-install.socket" r=$(uninst)
 expect "left alone" [ -f "$SU" ] && said "comes from /etc/systemd/user/peridot-install.socket" && not_logged "stop peridot-install.socket" && ok
+case_ "5. an edited socket that listens elsewhere, or whose template runs something else, is left running with its instances"
+for v in "FAKE_SOCKET_LISTEN=/tmp/other.sock (Stream)" "FAKE_SOCKET_ACCEPT=no" "FAKE_INSTALL_EXECSTART={ path=/usr/bin/other ; argv[]=/usr/bin/other }"; do
+  fresh2; inst >/dev/null; echo "# mine" >>"$SU"; : >"$FAKE_LOG"; r=$(export "$v"; uninst)
+  expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$SU" ] && expect "socket not stopped ($v)" not_logged "stop peridot-install.socket" &&
+  said "no longer starts Peridot's install script" || break
+done && ok
+fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_INSTALL_EXECSTART="{ path=/usr/bin/other ; argv[]=/usr/bin/other }" r=$(uninst)
+expect "Peridot's own files removed" [ ! -e "$SU" ] && expect "instances of a repurposed template not stopped" not_logged "stop peridot-install@*.service" && ok
 
 finish

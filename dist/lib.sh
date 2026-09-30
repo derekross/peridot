@@ -456,8 +456,39 @@ inspect_unit() {
       else UNIT_STATE=foreign; fi ;;
   esac
 }
-unit_runs_our_binary() { [[ $UNIT_EXECSTART == *"$BINDIR/peridotd"* ]]; }
+unit_runs_our_binary() { exec_only "$UNIT_EXECSTART" "$BINDIR/peridotd"; }
 unit_is_active() { systemctl --user is-active --quiet peridot.service 2>/dev/null; }
+
+# What a unit runs or listens on, as systemd has loaded it (drop-ins
+# included). A unit is stopped only while that is Peridot's own program,
+# never because its file mentions Peridot: a unit you repurposed keeps
+# running.
+RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+# unit_prop <unit> <property>: its value(s), one per line.
+unit_prop() {
+  systemctl --user show -p "$2" "$1" 2>/dev/null | awk -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2) }' || true
+}
+# exec_path <ExecStart as systemctl shows it>: the first command's program.
+exec_path() { [[ $1 =~ \{\ path=([^\ \;}]+) ]] && printf '%s\n' "${BASH_REMATCH[1]}"; }
+# exec_only <ExecStart> <program>: exactly one command, and it is <program>.
+exec_only() {
+  [[ $(grep -o '{ path=' <<<"$1" | wc -l) == 1 && "$(exec_path "$1")" == "$2" ]]
+}
+# The proxy: one xdg-dbus-proxy serving Peridot's bus socket.
+proxy_serves_peridot() {
+  local ex prog
+  ex="$(unit_prop peridot-dbus-proxy.service ExecStart)"
+  prog="$(exec_path "$ex")" || return 1
+  [[ ${prog##*/} == xdg-dbus-proxy ]] && exec_only "$ex" "$prog" && [[ " $ex " == *" $RUNTIME_DIR/peridot/bus "* ]]
+}
+# The install template: runs Peridot's install script and nothing else.
+install_unit_runs_our_script() { exec_only "$(unit_prop peridot-install@peridot.service ExecStart)" "$INSTALLER"; }
+# The socket: listens only where the daemon asks, and each connection
+# starts an instance of that template.
+socket_serves_peridot() {
+  [[ "$(unit_prop peridot-install.socket Listen)" == "$RUNTIME_DIR/peridot-install.sock (Stream)" &&
+     "$(unit_prop peridot-install.socket Accept)" == yes ]] && install_unit_runs_our_script
+}
 
 # The other two units, the same way: aux_unit_state <path> <name systemd
 # knows it by> <logical path> leaves the state in AUX_STATE (missing |

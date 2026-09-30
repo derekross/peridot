@@ -4,9 +4,9 @@ case "$2" in
   is-active) exit "${FAKE_ACTIVE_RC:-3}" ;;
   show)
     case "$*" in
-      *peridot-install@*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_INSTALL_FRAGMENT:-}" ;;
-      *peridot-dbus-proxy*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_PROXY_FRAGMENT:-}" ;;
-      *peridot-install.socket*) printf 'FragmentPath=%s\nExecStart=\n' "${FAKE_SOCKET_FRAGMENT:-}" ;;
+      *peridot-install@*) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_INSTALL_FRAGMENT:-}" "${FAKE_INSTALL_EXECSTART:-}" ;;
+      *peridot-dbus-proxy*) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_PROXY_FRAGMENT:-}" "${FAKE_PROXY_EXECSTART:-}" ;;
+      *peridot-install.socket*) printf 'FragmentPath=%s\nListen=%s\nAccept=%s\n' "${FAKE_SOCKET_FRAGMENT:-}" "${FAKE_SOCKET_LISTEN:-}" "${FAKE_SOCKET_ACCEPT:-}" ;;
       *) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_FRAGMENT:-}" "${FAKE_EXECSTART:-}" ;;
     esac ;;
   status) echo "* opal.service - fake" ;;

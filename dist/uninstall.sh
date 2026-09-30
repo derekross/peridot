@@ -58,17 +58,19 @@ inspect_unit
 say "Stopping the service"
 case $UNIT_STATE in
   owned)
-    if [[ -z $UNIT_FRAGMENT || $UNIT_FRAGMENT == "$UNIT" ]]; then
-      systemctl_user disable --now peridot.service
-    else
-      systemctl_user stop peridot.service
-    fi
+    systemctl_user disable peridot.service
+    if unit_runs_our_binary; then systemctl_user stop peridot.service
+    elif unit_is_active; then note "peridot.service is running but doesn't start $BINDIR/peridotd (a drop-in?); not stopped."; fi
     remove_owned "$UNIT" "$(file_hash "$UNIT")"
     systemctl_user daemon-reload ;;
   edited)
-    systemctl_user stop peridot.service
-    note "$UNIT is kept: you changed it. It starts the binary this removes, so it is stopped but not disabled;"
-    note "when you're done with it: systemctl --user disable peridot.service && rm $UNIT" ;;
+    if unit_runs_our_binary; then
+      systemctl_user stop peridot.service
+      note "$UNIT is kept: you changed it. It starts the binary this removes, so it is stopped but not disabled;"
+      note "when you're done with it: systemctl --user disable peridot.service && rm $UNIT"
+    else
+      note "$UNIT is kept: you changed it, and it doesn't start $BINDIR/peridotd, so it is left alone."
+    fi ;;
   elsewhere)
     if unit_runs_our_binary; then systemctl_user stop peridot.service; note "peridot.service comes from $UNIT_FRAGMENT (not Peridot's); stopped because it starts the binary this removes, otherwise left alone."
     else note "peridot.service comes from $UNIT_FRAGMENT; not Peridot's, leaving it alone."; fi ;;
@@ -86,12 +88,16 @@ esac
 inspect_proxy_unit
 case $PROXY_UNIT_STATE in
   owned)
-    systemctl_user stop peridot-dbus-proxy.service
+    proxy_serves_peridot && systemctl_user stop peridot-dbus-proxy.service
     remove_owned "$PROXY_UNIT" "$(file_hash "$PROXY_UNIT")"
     systemctl_user daemon-reload ;;
   edited)
-    systemctl_user stop peridot-dbus-proxy.service
-    note "$PROXY_UNIT is kept: you changed it. Only peridot.service uses it; remove it yourself when you're done with it." ;;
+    if proxy_serves_peridot; then
+      systemctl_user stop peridot-dbus-proxy.service
+      note "$PROXY_UNIT is kept: you changed it. Only peridot.service uses it; remove it yourself when you're done with it."
+    else
+      note "$PROXY_UNIT is kept: you changed it, and it no longer serves Peridot's bus socket, so it is left alone."
+    fi ;;
   elsewhere) note "peridot-dbus-proxy.service comes from $PROXY_UNIT_FRAGMENT; not Peridot's, leaving it alone." ;;
   symlink) note "$PROXY_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
   foreign) note "$PROXY_UNIT isn't Peridot's; leaving it alone." ;;
@@ -104,14 +110,18 @@ esac
 inspect_socket_unit
 case $SOCKET_UNIT_STATE in
   owned)
-    systemctl_user stop peridot-install.socket
-    systemctl_user stop 'peridot-install@*.service'
+    socket_serves_peridot && systemctl_user stop peridot-install.socket
+    install_unit_runs_our_script && systemctl_user stop 'peridot-install@*.service'
     remove_owned "$SOCKET_UNIT" "$(file_hash "$SOCKET_UNIT")"
     systemctl_user daemon-reload ;;
   edited)
-    systemctl_user stop peridot-install.socket
-    systemctl_user stop 'peridot-install@*.service'
-    note "$SOCKET_UNIT is kept: you changed it. It starts the script this removes; remove it yourself when you're done with it." ;;
+    if socket_serves_peridot; then
+      systemctl_user stop peridot-install.socket
+      systemctl_user stop 'peridot-install@*.service'
+      note "$SOCKET_UNIT is kept: you changed it. It starts the script this removes; remove it yourself when you're done with it."
+    else
+      note "$SOCKET_UNIT is kept: you changed it, and it no longer starts Peridot's install script from Peridot's socket, so it is left alone."
+    fi ;;
   elsewhere) note "peridot-install.socket comes from $SOCKET_UNIT_FRAGMENT; not Peridot's, leaving it alone." ;;
   symlink) note "$SOCKET_UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone." ;;
   foreign) note "$SOCKET_UNIT isn't Peridot's; leaving it alone." ;;
@@ -123,7 +133,7 @@ esac
 inspect_install_unit
 case $INSTALL_UNIT_STATE in
   owned)
-    systemctl_user stop 'peridot-install@*.service'
+    install_unit_runs_our_script && systemctl_user stop 'peridot-install@*.service'
     remove_owned "$INSTALL_UNIT" "$(file_hash "$INSTALL_UNIT")"
     systemctl_user daemon-reload ;;
   edited) note "$INSTALL_UNIT is kept: you changed it. It runs the script this removes; remove it yourself when you're done with it." ;;
