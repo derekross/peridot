@@ -73,6 +73,11 @@ pub struct App {
     /// up before the keyring is unlocked), so whether this computer is set
     /// up isn't known yet; [`App::resume_when_unlocked`] keeps trying.
     pub waiting_keyring: AtomicBool,
+    /// Held while the engine is stopped and started again, so two switches
+    /// (a rotation made here and the same rotation heard back from the
+    /// relays, or two relays delivering one announcement) can't interleave
+    /// and leave a runner behind on a client that was shut down.
+    switching: Mutex<()>,
 }
 
 impl App {
@@ -107,6 +112,7 @@ impl App {
             last_sync: AtomicU64::new(0),
             last_error: RwLock::new(None),
             waiting_keyring: AtomicBool::new(false),
+            switching: Mutex::new(()),
         });
         tokio::spawn(watch_opal(Arc::downgrade(&app)));
         app
@@ -268,8 +274,18 @@ impl App {
 
     /// Build the engine for `identity` and start the background runner.
     /// `fresh` publishes the root event (a brand-new identity, or a
-    /// restored one whose root we already have).
+    /// restored one whose root we already have). One switch at a time.
     pub async fn start_engine(
+        self: &Arc<Self>,
+        identity: Identity,
+        fresh: bool,
+    ) -> anyhow::Result<()> {
+        let _switching = self.switching.lock().await;
+        self.start_engine_locked(identity, fresh).await
+    }
+
+    /// [`Self::start_engine`] with the switch lock already held.
+    async fn start_engine_locked(
         self: &Arc<Self>,
         identity: Identity,
         fresh: bool,
@@ -404,8 +420,23 @@ impl App {
     /// runner does the last two, and retries them).
     pub async fn rotate(self: &Arc<Self>, remove: &[String]) -> anyhow::Result<u64> {
         let engine = self.engine().await?;
+        // Whichever engine ends up starting the new epoch (see below) must
+        // say everything again under the new keys and publish the root; the
+        // flags go in first. Should the announcement fail, the next start
+        // publishes once more than needed, which is harmless.
+        self.db.set_kv("peridot.republish_pending", "1")?;
+        self.db.set_kv("peridot.root_pending", "1")?;
         let next = engine.rotate(remove).await?;
         let epoch = next.epoch();
+        // This computer hears its own announcement back from the relays
+        // and would adopt it too; under the switch lock, whichever of the
+        // two gets here first restarts the engine, and the other sees the
+        // epoch already current.
+        let _switching = self.switching.lock().await;
+        let engine = self.engine().await?;
+        if engine.epoch() >= epoch {
+            return Ok(epoch);
+        }
         let old = engine.identity().secret.clone();
         let identity = engine.identity().clone().with_secret(next);
         // Order: the new secret is saved before anything switches, so a
@@ -416,11 +447,7 @@ impl App {
             "peridot.window_until",
             &(Timestamp::now().as_secs() + WINDOW).to_string(),
         )?;
-        self.db.set_kv("peridot.republish_pending", "1")?;
-        // The root event names the new epoch; a restart before it went
-        // out must still publish it.
-        self.db.set_kv("peridot.root_pending", "1")?;
-        self.start_engine(identity, true).await?;
+        self.start_engine_locked(identity, true).await?;
         Ok(epoch)
     }
 
@@ -449,6 +476,7 @@ impl App {
         self: &Arc<Self>,
         secret: peridot_sync::crypto::SyncSecret,
     ) -> anyhow::Result<()> {
+        let _switching = self.switching.lock().await;
         let engine = self.engine().await?;
         if secret.epoch() <= engine.epoch() {
             return Ok(());
@@ -461,7 +489,9 @@ impl App {
             "peridot.window_until",
             &(Timestamp::now().as_secs() + WINDOW).to_string(),
         )?;
-        self.start_engine(identity, false).await?;
+        // The rotator republishes everything and the root; a computer
+        // that adopts publishes its own entry again, which the runner does.
+        self.start_engine_locked(identity, false).await?;
         tracing::info!("moved to epoch {}", self.engine().await?.epoch());
         Ok(())
     }
