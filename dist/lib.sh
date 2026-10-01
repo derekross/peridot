@@ -483,6 +483,17 @@ proxy_serves_peridot() {
 }
 # The install template: runs Peridot's install script and nothing else.
 install_unit_runs_our_script() { exec_only "$(unit_prop peridot-install@peridot.service ExecStart)" "$INSTALLER"; }
+# Each running instance, one by one: an instance can have drop-ins of its
+# own, so the template's command says nothing about it. Stopped only while
+# it runs Peridot's install script and nothing else.
+stop_install_instances() {
+  local u
+  while read -r u _; do
+    [[ $u == peridot-install@?*.service ]] || continue
+    if exec_only "$(unit_prop "$u" ExecStart)" "$INSTALLER"; then systemctl_user stop "$u"
+    else note "$u runs something other than $INSTALLER; not stopped."; fi
+  done < <(systemctl --user list-units --plain --no-legend 'peridot-install@*.service' 2>/dev/null || true)
+}
 # The socket: listens only where the daemon asks, and each connection
 # starts an instance of that template.
 socket_serves_peridot() {

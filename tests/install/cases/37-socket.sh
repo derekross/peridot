@@ -29,9 +29,9 @@ fresh2; FAKE_SOCKET_FRAGMENT="/etc/systemd/user/peridot-install.socket" r=$(inst
 expect "stop" [ "$r" = 1 ] && said "already provided by /etc/systemd/user/peridot-install.socket" && [ ! -e "$SU" ] && ok
 
 case_ "4. uninstall stops the socket and its instances, removes Peridot's unit and reloads; an edited one is stopped but kept; one from elsewhere is left alone"
-fresh2; inst >/dev/null; : >"$FAKE_LOG"; r=$(uninst)
+fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_INSTANCES="peridot-install@1-a.service" r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "gone" [ ! -e "$SU" ] &&
-expect "socket stopped" logged "stop peridot-install.socket" && expect "instances stopped" logged "stop peridot-install@*.service" &&
+expect "socket stopped" logged "stop peridot-install.socket" && expect "instances stopped" logged "stop peridot-install@1-a.service" &&
 expect "stopped before removal" [ "$(grep -n 'stop peridot-install.socket' "$FAKE_LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n 'daemon-reload' "$FAKE_LOG" | tail -1 | cut -d: -f1)" ] && ok
 fresh2; inst >/dev/null; echo "# mine" >>"$SU"; : >"$FAKE_LOG"; r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$SU" ] && said "$SU is kept: you changed it" && logged "stop peridot-install.socket" && ok
@@ -43,7 +43,14 @@ for v in "FAKE_SOCKET_LISTEN=/tmp/other.sock (Stream)" "FAKE_SOCKET_ACCEPT=no" "
   expect "exit 0" [ "$r" = 0 ] && expect "kept" [ -f "$SU" ] && expect "socket not stopped ($v)" not_logged "stop peridot-install.socket" &&
   said "no longer starts Peridot's install script" || break
 done && ok
-fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_INSTALL_EXECSTART="{ path=/usr/bin/other ; argv[]=/usr/bin/other }" r=$(uninst)
-expect "Peridot's own files removed" [ ! -e "$SU" ] && expect "instances of a repurposed template not stopped" not_logged "stop peridot-install@*.service" && ok
+fresh2; inst >/dev/null; : >"$FAKE_LOG"; FAKE_INSTANCES="peridot-install@1-a.service" FAKE_INSTALL_EXECSTART="{ path=/usr/bin/other ; argv[]=/usr/bin/other }" r=$(uninst)
+expect "Peridot's own files removed" [ ! -e "$SU" ] && expect "instances of a repurposed template not stopped" not_logged "stop peridot-install@1-a.service" && ok
+
+case_ "6. a running instance with its own drop-in running something else is not stopped; Peridot's own instances are"
+fresh2; inst >/dev/null; : >"$FAKE_LOG"
+FAKE_INSTANCES="peridot-install@1-a.service peridot-install@2-b.service" FAKE_ROGUE_INSTANCE="peridot-install@2-b.service" r=$(uninst)
+expect "exit 0" [ "$r" = 0 ] && expect "ours stopped" logged "stop peridot-install@1-a.service" &&
+expect "rogue not stopped" not_logged "stop peridot-install@2-b.service" && said "peridot-install@2-b.service runs something other than" &&
+expect "never by pattern" not_logged "stop peridot-install@*" && ok
 
 finish

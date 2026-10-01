@@ -35,9 +35,10 @@ expect "exit 0" [ "$r" = 0 ] && expect "replaced" same "$ROOT/dist/peridot-insta
 expect "backup" grep -q theirs "$B"/peridot-install.* && expect "recorded" manifest_verifies && ok
 
 case_ "5. uninstall removes both when they are Peridot's, stops instances, reloads; an edited unit stays"
-fresh2; inst >/dev/null; r=$(uninst)
+fresh2; inst >/dev/null; FAKE_INSTANCES="peridot-install@1-a.service peridot-install@2-b.service" r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "script gone" [ ! -e "$S" ] && expect "unit gone" [ ! -e "$U2" ] &&
-expect "instances stopped" logged "stop peridot-install@*.service" && expect "reloaded" logged "daemon-reload" && ok
+expect "instances stopped" logged "stop peridot-install@1-a.service" && logged "stop peridot-install@2-b.service" &&
+expect "never by pattern" not_logged "stop peridot-install@*" && expect "reloaded" logged "daemon-reload" && ok
 fresh2; inst >/dev/null; echo "# mine" >>"$U2"; printf 'theirs\n' >"$S"; r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "unit kept" [ -f "$U2" ] && said "$U2 is kept: you changed it" &&
 expect "script kept" [ "$(cat "$S")" = theirs ] && said "$S isn't recorded" && ok

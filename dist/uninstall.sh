@@ -111,13 +111,13 @@ inspect_socket_unit
 case $SOCKET_UNIT_STATE in
   owned)
     socket_serves_peridot && systemctl_user stop peridot-install.socket
-    install_unit_runs_our_script && systemctl_user stop 'peridot-install@*.service'
+    stop_install_instances
     remove_owned "$SOCKET_UNIT" "$(file_hash "$SOCKET_UNIT")"
     systemctl_user daemon-reload ;;
   edited)
     if socket_serves_peridot; then
       systemctl_user stop peridot-install.socket
-      systemctl_user stop 'peridot-install@*.service'
+      stop_install_instances
       note "$SOCKET_UNIT is kept: you changed it. It starts the script this removes; remove it yourself when you're done with it."
     else
       note "$SOCKET_UNIT is kept: you changed it, and it no longer starts Peridot's install script from Peridot's socket, so it is left alone."
@@ -133,7 +133,7 @@ esac
 inspect_install_unit
 case $INSTALL_UNIT_STATE in
   owned)
-    install_unit_runs_our_script && systemctl_user stop 'peridot-install@*.service'
+    stop_install_instances
     remove_owned "$INSTALL_UNIT" "$(file_hash "$INSTALL_UNIT")"
     systemctl_user daemon-reload ;;
   edited) note "$INSTALL_UNIT is kept: you changed it. It runs the script this removes; remove it yourself when you're done with it." ;;

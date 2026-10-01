@@ -2,8 +2,13 @@
 echo "systemctl $*" >> "${FAKE_LOG:-/dev/null}"
 case "$2" in
   is-active) exit "${FAKE_ACTIVE_RC:-3}" ;;
+  list-units)
+    # Running install instances, one per word of FAKE_INSTANCES.
+    for u in ${FAKE_INSTANCES:-}; do printf '%s loaded active running Peridot: Omarchy install\n' "$u"; done ;;
   show)
     case "$*" in
+      # An instance whose own drop-in runs something else.
+      *" ${FAKE_ROGUE_INSTANCE:-none}") printf 'FragmentPath=%s\nExecStart={ path=/usr/bin/other ; argv[]=/usr/bin/other }\n' "${FAKE_INSTALL_FRAGMENT:-}" ;;
       *peridot-install@*) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_INSTALL_FRAGMENT:-}" "${FAKE_INSTALL_EXECSTART:-}" ;;
       *peridot-dbus-proxy*) printf 'FragmentPath=%s\nExecStart=%s\n' "${FAKE_PROXY_FRAGMENT:-}" "${FAKE_PROXY_EXECSTART:-}" ;;
       *peridot-install.socket*) printf 'FragmentPath=%s\nListen=%s\nAccept=%s\n' "${FAKE_SOCKET_FRAGMENT:-}" "${FAKE_SOCKET_LISTEN:-}" "${FAKE_SOCKET_ACCEPT:-}" ;;
