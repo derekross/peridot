@@ -483,15 +483,56 @@ proxy_serves_peridot() {
 }
 # The install template: runs Peridot's install script and nothing else.
 install_unit_runs_our_script() { exec_only "$(unit_prop peridot-install@peridot.service ExecStart)" "$INSTALLER"; }
+# unit_in_scope <unit>: it is one of Peridot's units, running Peridot's
+# own program as loaded now.
+unit_in_scope() {
+  case $1 in
+    peridot.service) exec_only "$(unit_prop peridot.service ExecStart)" "$BINDIR/peridotd" ;;
+    peridot-dbus-proxy.service) proxy_serves_peridot ;;
+    peridot-install.socket) socket_serves_peridot ;;
+    peridot-install@?*.service) exec_only "$(unit_prop "$1" ExecStart)" "$INSTALLER" ;;
+    *) return 1 ;;
+  esac
+}
+# stop_closure <unit>: it and every unit systemd stops or restarts along
+# with it (whatever is PartOf=, BindsTo= or Requires(ite)= it, and so on),
+# one per line.
+stop_closure() {
+  local -A seen=()
+  local queue=("$1") u d
+  while (( ${#queue[@]} )); do
+    u=${queue[0]}; queue=("${queue[@]:1}")
+    [[ -n ${seen[$u]:-} ]] && continue
+    seen[$u]=1; printf '%s\n' "$u"
+    for d in $(systemctl --user show --value -p ConsistsOf -p BoundBy -p RequiredBy -p RequisiteOf "$u" 2>/dev/null || true); do
+      queue+=("$d")
+    done
+  done
+}
+# scoped <stop|restart> <unit>: does it only if every unit that would go
+# down with it and is running now is in scope; otherwise names them and
+# touches nothing (1).
+scoped() {
+  local u state out=() did=stopped
+  [[ $1 == restart ]] && did=restarted
+  while read -r u; do
+    state="$(unit_prop "$u" ActiveState)"
+    [[ -z $state || $state == inactive || $state == failed ]] && continue
+    unit_in_scope "$u" || out+=("$u")
+  done < <(stop_closure "$2")
+  if (( ${#out[@]} )); then
+    note "$2 not $did: that would also take down ${out[*]} (running, and not Peridot's own program)."
+    return 1
+  fi
+  systemctl_user "$1" "$2"
+}
 # Each running instance, one by one: an instance can have drop-ins of its
-# own, so the template's command says nothing about it. Stopped only while
-# it runs Peridot's install script and nothing else.
+# own, so the template's command says nothing about it.
 stop_install_instances() {
   local u
   while read -r u _; do
     [[ $u == peridot-install@?*.service ]] || continue
-    if exec_only "$(unit_prop "$u" ExecStart)" "$INSTALLER"; then systemctl_user stop "$u"
-    else note "$u runs something other than $INSTALLER; not stopped."; fi
+    scoped stop "$u" || true
   done < <(systemctl --user list-units --plain --no-legend 'peridot-install@*.service' 2>/dev/null || true)
 }
 # The socket: listens only where the daemon asks, and each connection

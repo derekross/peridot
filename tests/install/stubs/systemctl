@@ -6,6 +6,18 @@ case "$2" in
     # Running install instances, one per word of FAKE_INSTANCES.
     for u in ${FAKE_INSTANCES:-}; do printf '%s loaded active running Peridot: Omarchy install\n' "$u"; done ;;
   show)
+    for unit; do :; done   # the last argument
+    case "$*" in
+      # What a stop of the unit takes down with it: FAKE_DEPS holds
+      # "<unit>:<dep>,<dep> …".
+      *" --value -p ConsistsOf "*)
+        for e in ${FAKE_DEPS:-}; do [ "${e%%:*}" = "$unit" ] && echo "${e#*:}" | tr ',' ' '; done
+        exit 0 ;;
+      # Running units are the words of FAKE_RUNNING and FAKE_INSTANCES.
+      *" -p ActiveState "*)
+        case " ${FAKE_RUNNING:-} ${FAKE_INSTANCES:-} " in *" $unit "*) echo ActiveState=active ;; *) echo ActiveState=inactive ;; esac
+        exit 0 ;;
+    esac
     case "$*" in
       # An instance whose own drop-in runs something else.
       *" ${FAKE_ROGUE_INSTANCE:-none}") printf 'FragmentPath=%s\nExecStart={ path=/usr/bin/other ; argv[]=/usr/bin/other }\n' "${FAKE_INSTALL_FRAGMENT:-}" ;;

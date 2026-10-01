@@ -50,7 +50,7 @@ case_ "6. a running instance with its own drop-in running something else is not 
 fresh2; inst >/dev/null; : >"$FAKE_LOG"
 FAKE_INSTANCES="peridot-install@1-a.service peridot-install@2-b.service" FAKE_ROGUE_INSTANCE="peridot-install@2-b.service" r=$(uninst)
 expect "exit 0" [ "$r" = 0 ] && expect "ours stopped" logged "stop peridot-install@1-a.service" &&
-expect "rogue not stopped" not_logged "stop peridot-install@2-b.service" && said "peridot-install@2-b.service runs something other than" &&
+expect "rogue not stopped" not_logged "stop peridot-install@2-b.service" && said "peridot-install@2-b.service not stopped" &&
 expect "never by pattern" not_logged "stop peridot-install@*" && ok
 
 finish

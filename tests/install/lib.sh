@@ -9,11 +9,14 @@ FAILS=0
 fresh() {
   export HOME; HOME="$(mktemp -d)"
   unset XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME
-  export FAKE_LOG="$HOME/calls.log" FAKE_ACTIVE_RC=3 FAKE_FRAGMENT="" FAKE_INSTALL_FRAGMENT="" FAKE_PROXY_FRAGMENT="" FAKE_SOCKET_FRAGMENT="" FAKE_EXECSTART="" FAKE_INSTANCES="" FAKE_ROGUE_INSTANCE="" FAKE_MIME="" FAKE_SECRET_RC=0
+  export FAKE_LOG="$HOME/calls.log" FAKE_ACTIVE_RC=3 FAKE_FRAGMENT="" FAKE_INSTALL_FRAGMENT="" FAKE_PROXY_FRAGMENT="" FAKE_SOCKET_FRAGMENT="" FAKE_EXECSTART="" FAKE_INSTANCES="" FAKE_ROGUE_INSTANCE="" FAKE_RUNNING="" FAKE_MIME="" FAKE_SECRET_RC=0
   # The helper units as systemd would load Peridot's own files.
   local run="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
   export FAKE_PROXY_EXECSTART="{ path=/usr/bin/xdg-dbus-proxy ; argv[]=/usr/bin/xdg-dbus-proxy \${DBUS_SESSION_BUS_ADDRESS} $run/peridot/bus --filter --talk=org.freedesktop.secrets --talk=org.freedesktop.Notifications ; ignore_errors=no }"
   export FAKE_INSTALL_EXECSTART="{ path=$HOME/.local/bin/peridot-install ; argv[]=$HOME/.local/bin/peridot-install ; ignore_errors=no }"
+  # As Peridot's units relate: the proxy is PartOf= the service, which is
+  # BindsTo= the proxy.
+  export FAKE_DEPS="peridot.service:peridot-dbus-proxy.service peridot-dbus-proxy.service:peridot.service"
   export FAKE_SOCKET_LISTEN="$run/peridot-install.sock (Stream)" FAKE_SOCKET_ACCEPT=yes
   export FAKE_SECRETS="$HOME/fake-secrets"
   printf 'device-identity d1\nsync-secret s1\n' >"$FAKE_SECRETS"

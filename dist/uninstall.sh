@@ -59,20 +59,22 @@ say "Stopping the service"
 case $UNIT_STATE in
   owned)
     systemctl_user disable peridot.service
-    if unit_runs_our_binary; then systemctl_user stop peridot.service
+    if unit_runs_our_binary; then scoped stop peridot.service || true
     elif unit_is_active; then note "peridot.service is running but doesn't start $BINDIR/peridotd (a drop-in?); not stopped."; fi
     remove_owned "$UNIT" "$(file_hash "$UNIT")"
     systemctl_user daemon-reload ;;
   edited)
-    if unit_runs_our_binary; then
-      systemctl_user stop peridot.service
+    if unit_runs_our_binary && scoped stop peridot.service; then
       note "$UNIT is kept: you changed it. It starts the binary this removes, so it is stopped but not disabled;"
       note "when you're done with it: systemctl --user disable peridot.service && rm $UNIT"
+    elif unit_runs_our_binary; then
+      note "$UNIT is kept: you changed it. It starts the binary this removes; stop it yourself when you're done with it."
     else
       note "$UNIT is kept: you changed it, and it doesn't start $BINDIR/peridotd, so it is left alone."
     fi ;;
   elsewhere)
-    if unit_runs_our_binary; then systemctl_user stop peridot.service; note "peridot.service comes from $UNIT_FRAGMENT (not Peridot's); stopped because it starts the binary this removes, otherwise left alone."
+    if unit_runs_our_binary && scoped stop peridot.service; then note "peridot.service comes from $UNIT_FRAGMENT (not Peridot's); stopped because it starts the binary this removes, otherwise left alone."
+    elif unit_runs_our_binary; then note "peridot.service comes from $UNIT_FRAGMENT (not Peridot's); it starts the binary this removes, so stop it yourself."
     else note "peridot.service comes from $UNIT_FRAGMENT; not Peridot's, leaving it alone."; fi ;;
   symlink)
     note "$UNIT is a symbolic link (masked or linked); not Peridot's, leaving it alone."
@@ -83,17 +85,18 @@ case $UNIT_STATE in
 esac
 (( UNIT_DROPIN )) && note "$UNIT.d/ drop-ins are yours; not touched."
 
-# The bus proxy: stopped once the service is (PartOf= stops it with the
-# service; this covers a service that wasn't Peridot's to stop).
+# The bus proxy: normally already stopped with the service (PartOf=); a
+# stop of the service went ahead only if this was in scope too. This covers
+# a service that wasn't Peridot's to stop.
 inspect_proxy_unit
 case $PROXY_UNIT_STATE in
   owned)
-    proxy_serves_peridot && systemctl_user stop peridot-dbus-proxy.service
+    proxy_serves_peridot && { scoped stop peridot-dbus-proxy.service || true; }
     remove_owned "$PROXY_UNIT" "$(file_hash "$PROXY_UNIT")"
     systemctl_user daemon-reload ;;
   edited)
     if proxy_serves_peridot; then
-      systemctl_user stop peridot-dbus-proxy.service
+      scoped stop peridot-dbus-proxy.service || true
       note "$PROXY_UNIT is kept: you changed it. Only peridot.service uses it; remove it yourself when you're done with it."
     else
       note "$PROXY_UNIT is kept: you changed it, and it no longer serves Peridot's bus socket, so it is left alone."
@@ -110,13 +113,13 @@ esac
 inspect_socket_unit
 case $SOCKET_UNIT_STATE in
   owned)
-    socket_serves_peridot && systemctl_user stop peridot-install.socket
+    socket_serves_peridot && { scoped stop peridot-install.socket || true; }
     stop_install_instances
     remove_owned "$SOCKET_UNIT" "$(file_hash "$SOCKET_UNIT")"
     systemctl_user daemon-reload ;;
   edited)
     if socket_serves_peridot; then
-      systemctl_user stop peridot-install.socket
+      scoped stop peridot-install.socket || true
       stop_install_instances
       note "$SOCKET_UNIT is kept: you changed it. It starts the script this removes; remove it yourself when you're done with it."
     else

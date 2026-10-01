@@ -42,4 +42,28 @@ for ex in "{ path=/usr/bin/other ; argv[]=/usr/bin/other }" "{ path=/usr/bin/xdg
   said "no longer serves Peridot's bus socket" || break
 done && ok
 
+case_ "6. a running proxy repurposed by a drop-in is not taken down through PartOf=: the service isn't stopped or restarted either"
+ours() { echo "{ path=$HOME/.local/bin/peridotd ; argv[]=$HOME/.local/bin/peridotd }"; }
+OTHER="{ path=/usr/bin/other ; argv[]=/usr/bin/other }"
+fresh2; inst >/dev/null; : >"$FAKE_LOG"
+FAKE_EXECSTART="$(ours)" FAKE_PROXY_EXECSTART="$OTHER" FAKE_RUNNING="peridot.service peridot-dbus-proxy.service" r=$(uninst)
+expect "exit 0" [ "$r" = 0 ] && expect "service not stopped" not_logged "stop peridot.service" &&
+expect "proxy not stopped" not_logged "stop peridot-dbus-proxy.service" &&
+expect "named" said "peridot.service not stopped: that would also take down peridot-dbus-proxy.service" && ok
+fresh2; inst >/dev/null; : >"$FAKE_LOG"
+FAKE_ACTIVE_RC=0 FAKE_EXECSTART="$(ours)" FAKE_PROXY_EXECSTART="$OTHER" FAKE_RUNNING="peridot.service peridot-dbus-proxy.service" r=$(inst)
+expect "exit 0" [ "$r" = 0 ] && expect "not restarted" not_logged "restart peridot.service" && said "peridot.service not restarted" && ok
+
+case_ "7. the same proxy, not running: nothing of yours goes down, so the service is stopped"
+fresh2; inst >/dev/null; : >"$FAKE_LOG"
+FAKE_EXECSTART="$(ours)" FAKE_PROXY_EXECSTART="$OTHER" FAKE_RUNNING="peridot.service" r=$(uninst)
+expect "exit 0" [ "$r" = 0 ] && expect "stopped" logged "stop peridot.service" && ok
+
+case_ "8. a unit of yours that Requires= the proxy, two steps away, keeps the service running"
+fresh2; inst >/dev/null; : >"$FAKE_LOG"
+FAKE_EXECSTART="$(ours)" FAKE_DEPS="peridot.service:peridot-dbus-proxy.service peridot-dbus-proxy.service:peridot.service,mine.service" \
+  FAKE_RUNNING="peridot.service peridot-dbus-proxy.service mine.service" r=$(uninst)
+expect "exit 0" [ "$r" = 0 ] && expect "not stopped" not_logged "stop peridot.service" && not_logged "stop peridot-dbus-proxy.service" &&
+expect "named" said "would also take down mine.service" && ok
+
 finish

@@ -335,8 +335,8 @@ case $UNIT_STATE in
   owned | edited)
     systemctl_user daemon-reload
     if unit_is_active && unit_runs_our_binary; then
-      systemctl_user restart peridot.service
-      say "peridot.service restarted with the new build."
+      if scoped restart peridot.service; then say "peridot.service restarted with the new build."
+      else say "peridot.service not restarted (see above); restart it yourself if you want the new build."; fi
     elif unit_is_active; then
       say "peridot.service is running but doesn't start $BINDIR/peridotd; restart it yourself if you want the new build."
     else
@@ -347,7 +347,7 @@ esac
 # peridot.service wants the socket, so it is up whenever the service is;
 # a rewritten socket unit listens where the new file says only once
 # restarted.
-(( SOCKET_WRITTEN )) && systemctl_user restart peridot-install.socket
+if (( SOCKET_WRITTEN )); then scoped restart peridot-install.socket || true; fi
 
 case $MENU_STATE in
   present) say "Share menu: the Private link entries are already in $MENU" ;;
