@@ -251,10 +251,10 @@ For each received event a client MUST:
 
 1. discard it unless the kind is 30078, the signature verifies, it has a `d` tag, and `created_at ≤ now + 600`;
 2. if the author is `R_{e+1}`, treat it as a rotation announcement (6.2) and stop;
-3. if the author is `K_e`, open it with the current keys; if the author is `K_{e-1}` during the window, open it with the previous keys **and** re-seal and re-queue it under the current keys so it survives the cleanup; otherwise discard it;
+3. if the author is `K_e`, open it with the current keys; if the author is `K_{e-1}` during the window, open it with the previous keys **and** re-seal and re-queue it under the current keys so it survives the cleanup, except a device entry, which is discarded (6.4); otherwise discard it;
 4. record its `created_at` as `last_seen` if larger;
 5. for a file entry, discard it unless the path is one the client's own manifest could ever sync (4.4). A path in the never or local tier is refused even inside a validly signed event;
-6. store it with the newest-wins rule of 3.5: a file entry replaces the stored one for its path only when newer, or equal with a smaller event id; chunks are stored by hash; device and state entries by id and variant.
+6. store it with the newest-wins rule of 3.5: a file entry replaces the stored one for its path only when newer, or equal with a smaller event id; chunks are stored by hash; device and state entries by id and variant. A device entry is recorded with the epoch it was opened under, and one from a newer epoch replaces one from an older epoch whatever their `created_at`.
 
 ### 4.3 File status
 
@@ -344,7 +344,7 @@ loc = hex( SHA256( "peridot/locator" ‖ D_rot pubkey ‖ D_i pubkey ‖ u64_be(
 w   = NIP-44 v2( D_rot → D_i, "v2:<e+1>:<hex of S_{e+1}>" )
 ```
 
-There is one wrap per **remaining** device: every device entry that is not `removed`, not in the removal list, that has a `pubkey`, and is not the rotator itself. The event has `d = "0"`, so there is exactly one rotation event per rekey address and relays replace it. Every current device already listens for `R_{e+1}` (4.1), because it is derivable from `S_e`. The rotation event is published before the rotator switches its own keys, so a crash before the switch leaves everything as it was.
+There is one wrap per **remaining** device: every device entry recorded under the current epoch `e` (4.2 step 6) that is not `removed`, not in the removal list, that has a `pubkey`, and is not the rotator itself. An entry recorded under an older epoch gets no wrap until it is said again under `e`. A client that has received a rotation announcement from its current epoch MUST NOT start a rotation from that epoch: it adopts (or stops) first. The event has `d = "0"`, so there is exactly one rotation event per rekey address and relays replace it. Every current device already listens for `R_{e+1}` (4.1), because it is derivable from `S_e`. The rotation event is published before the rotator switches its own keys, so a crash before the switch leaves everything as it was.
 
 Adopting. A device receiving an event from `R_{e+1}` MUST: check that the author equals its own derived `R_{e+1}` and that the signature verifies; decrypt with `R_{e+1}`'s self key; require `v == 2`, `prev == e`, `epoch == e + 1` and `prevcommit == commitment(S_e)`, else discard (it continues from a secret this device does not hold: a forgery or a fork); compute `loc` for `(rotator, own device pubkey, e + 1)`; if a wrap with that `loc` exists, decrypt `w` with the device key against the rotator's pubkey, parse the secret and require its epoch to be `e + 1`. Then **adopt**: keep `S_e` as the previous secret, store `S_{e+1}` as current, open the window (6.3), and restart with the new keys. If no wrap matches, the device has been **removed**: it MUST stop syncing and tell the user to pair again. Its files stay as they are. A removed device can open the envelope, since it holds `S_e`, and count the wraps, but none opens for it.
 
@@ -355,7 +355,7 @@ A client whose stored epoch is already at or past the announced one ignores the 
 The rotator, and for step 3 each adopting device:
 
 1. publishes the root event with the new secret (section 5);
-2. re-publishes every item it knows (all file entries, their chunks, the three state entries, every device entry, including entries marked `removed: true` so the directory shows the removal) sealed and named under the new keys, each dated after the newest `created_at` it knew for that item;
+2. re-publishes every item it knows (all file entries, their chunks, the three state entries, every device entry recorded under `e`, including entries marked `removed: true` so the directory shows the removal) sealed and named under the new keys, each dated after the newest `created_at` it knew for that item;
 3. keeps the previous secret for a **window** of 7 days, during which it still subscribes to `K_e` and re-seals anything that arrives under it (4.2 step 3); when the window closes, it fetches every kind 30078 event authored by `K_e` and sends NIP-09 kind 5 events signed by `K_e` (the identity key when `e = 0`) with the tag `["k", "30078"]` and one `["a", "30078:<K_e hex>:<d>"]` per event, at most 100 coordinates per deletion event; then it forgets `S_e`.
 
 A device that adopted does step 3 only; its items were re-said by the rotator.
@@ -364,7 +364,11 @@ The rotator persists the new secret, the previous secret, the window's end and "
 
 ### 6.4 Device removal
 
-Removing a computer is a rotation whose removal list names it. Its device entry is republished with `removed: true`; it receives no wrap, sees the announcement and stops. The previous epoch's copies, which it could still read, are deleted after the window. A client MUST tell the user the honest limit: what the removed computer already decrypted stays on it, and nothing can wipe it from afar. "Stop syncing here" on a computer forgets the local identity and state instead of going through this path.
+Removing a computer is a rotation whose removal list names it. Its device entry is republished with `removed: true`; it receives no wrap, sees the announcement and stops. The previous epoch's copies, which it could still read, are deleted after the window.
+
+The removed computer still holds `S_e` and can sign under `K_e` until the window closes. Device entries are why 4.2 discards them from the previous epoch and why only entries recorded under the current epoch receive wraps or are re-said: otherwise it could write, under `K_e`, an entry for a new device ID carrying its own device key, or its own entry no longer marked `removed`, and a remaining computer would re-seal that into `e + 1` or, having taken it in before switching, hand it the next secret at the following rotation. A remaining computer announces itself again under the new keys once it switches, so it loses nothing by this.
+
+A client MUST tell the user the honest limit: what the removed computer already decrypted stays on it, and nothing can wipe it from afar. "Stop syncing here" on a computer forgets the local identity and state instead of going through this path.
 
 ## 7. The legacy epoch and migration
 
@@ -455,7 +459,7 @@ Every event goes to every relay. Per-relay gaps are found and filled by the audi
 
 ## 10. The daily audit
 
-Once a day, and at startup when the last audit is older than a day, a client SHOULD check every relay for everything that should be there. The expected set is every current file entry, every chunk a live entry references, the three state entries, every device entry, and the root event.
+Once a day, and at startup when the last audit is older than a day, a client SHOULD check every relay for everything that should be there. The expected set is every current file entry, every chunk a live entry references, the three state entries, every device entry recorded under the current epoch (4.2 step 6), and the root event.
 
 1. For each relay separately, fetch the full item filter (`authors: [K_e]`, `since: 0`) and the root filter. A relay that does not answer within 15 s is unreachable. If no relay answers, the audit fails.
 2. For each event with a `d` tag by `K_e`, or by the identity for the root, record the newest `created_at` per `d` and which relays hold it. Events under a `d` that is not expected are candidates for removal. Every event is also ingested, since a relay that was down during a catch-up may hold news.
@@ -778,6 +782,7 @@ Handing the identity key to Opal changes nothing on the wire: the identity pubke
 
 - *No forward secrecy within an epoch.* Whoever obtains the sync secret can read every item of that epoch still on the relays, and the previous epoch's items during its window.
 - *A removed computer keeps its copy.* Nothing can wipe it remotely.
+- *A removed computer can still write until the window closes.* File and state entries it signs under the previous epoch's key are re-sealed by the remaining computers (4.2 step 3), which is what lets a computer that was asleep during the rotation keep its changes. Device entries are the exception (6.4), so it cannot get the next secret this way. Files that run commands are never applied unseen (4.5); other files are, when the optional auto-apply is on.
 - *Whoever holds the sync secret can push files that run commands* on every other computer; that is the product. The mitigations are that such files are never applied unseen (4.5), never gain an exec bit, never land outside the sync list (4.4), and that the user is shown which computer sent them.
 - *Relay availability.* Relays may drop events; the audit and the multi-relay set limit the damage but cannot prevent a total loss if every relay drops everything while no computer is online to republish.
 - *Local compromise.* A key kept in the login keyring is exactly as safe as the login session and the disk encryption. Moving the key into an external signer takes it out of the sync daemon's reach, but the sync secret itself must stay with the daemon.

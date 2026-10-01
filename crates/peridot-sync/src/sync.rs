@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use nostr_sdk::prelude::*;
 use opal_kit::relays::Outbox;
@@ -72,6 +72,10 @@ pub struct SyncEngine {
     /// A rotation another computer announced, waiting for the daemon to
     /// switch this engine over (or the news that we were removed).
     pending_rotation: std::sync::Mutex<Option<Rotation>>,
+    /// Set for good once a rotation from this epoch was heard: the engine
+    /// is replaced when this computer switches, so no rotation is started
+    /// from an epoch that has already moved on.
+    rotation_heard: AtomicBool,
     device: String,
     device_name: String,
     version: String,
@@ -199,6 +203,7 @@ impl SyncEngine {
             keys,
             previous,
             pending_rotation: std::sync::Mutex::new(None),
+            rotation_heard: AtomicBool::new(false),
             device,
             device_name: p.device_name,
             version: p.version,
@@ -232,8 +237,9 @@ impl SyncEngine {
     }
 
     /// Everything that should be on every server right now, with the
-    /// newest `created_at` we know for it.
-    fn expected_items(&self) -> anyhow::Result<Vec<(Sealed, Item, u64)>> {
+    /// newest `created_at` we know for it. Device entries only from
+    /// `device_epochs` (see [`SyncStore::devices_of`]).
+    fn expected_items(&self, device_epochs: &[u64]) -> anyhow::Result<Vec<(Sealed, Item, u64)>> {
         let mut out = Vec::new();
         let mut chunks: BTreeMap<String, u64> = BTreeMap::new();
         for path in self.store.remote_paths()? {
@@ -263,7 +269,7 @@ impl SyncEngine {
                 out.push((envelope::seal(&self.keys, &item)?, item, at));
             }
         }
-        for d in self.store.devices()? {
+        for d in self.store.devices_of(device_epochs)? {
             // Ours goes out daily anyway; the others' only need to exist.
             let item = Item::Device(d);
             out.push((envelope::seal(&self.keys, &item)?, item, u64::MAX));
@@ -280,7 +286,7 @@ impl SyncEngine {
     /// may want to be asked about.
     pub async fn audit(&self, now: u64) -> anyhow::Result<AuditReport> {
         let relays = self.relays.read().await.clone();
-        let expected = self.expected_items()?;
+        let expected = self.expected_items(&[self.epoch()])?;
         let root_d = Identity::root_name(&self.pubkey());
         let mut report = AuditReport {
             at: now,
@@ -702,7 +708,13 @@ impl SyncEngine {
             return self.take_rotation(ev);
         }
         // From the previous epoch, during its window: read it, and say it
-        // again under the current keys so it survives the cleanup.
+        // again under the current keys so it survives the cleanup. Never a
+        // device entry: a computer removed by the rotation still holds the
+        // previous secret, and an entry it wrote there (a new ID with its
+        // own key, or its own entry no longer marked removed) would make
+        // the next rotation hand it the new secret. The computers that
+        // remain announce themselves again under the new keys once they
+        // switch.
         let item = if ev.pubkey == self.sync_pubkey() {
             envelope::open(&self.keys, &d, &ev.content)
         } else if Some(ev.pubkey) == self.previous_pubkey() {
@@ -710,6 +722,10 @@ impl SyncEngine {
                 return false;
             };
             let opened = envelope::open(old_keys, &d, &ev.content);
+            if let Some(Item::Device(_)) = &opened {
+                tracing::debug!("ignoring a device entry from the previous epoch");
+                return false;
+            }
             if let Some(item) = &opened
                 && let Ok(sealed) = envelope::seal(&self.keys, item)
             {
@@ -743,7 +759,7 @@ impl SyncEngine {
                 false
             }
             Item::Device(d) => {
-                let _ = self.store.put_device(d, at);
+                let _ = self.store.put_device(d, at, self.epoch());
                 false
             }
             Item::State(s) => self
@@ -970,9 +986,12 @@ impl SyncEngine {
     }
 
     /// Everything this computer knows, said again under the current keys.
-    /// After a rotation, so the new epoch has it all.
+    /// After a rotation, so the new epoch has it all: the rotator's device
+    /// entries were all taken in under the epoch it rotated from, before
+    /// any removed computer could write anything that counts.
     pub async fn republish_everything(&self) -> anyhow::Result<usize> {
-        let items = self.expected_items()?;
+        let epoch = self.epoch();
+        let items = self.expected_items(&[epoch, epoch.saturating_sub(1)])?;
         let n = items.len();
         for (sealed, _, at) in items {
             let after = if at == u64::MAX { 0 } else { at };
@@ -995,6 +1014,13 @@ impl SyncEngine {
             missing == 0,
             "{missing} piece(s) of your settings haven't arrived yet; try again in a moment"
         );
+        // A rotation from elsewhere that this computer hasn't switched to
+        // yet: its directory may hold entries a computer removed there
+        // wrote under this epoch. Switch first.
+        anyhow::ensure!(
+            !self.rotation_heard.load(Ordering::SeqCst),
+            "another computer has just started a new epoch; try again once this one has switched"
+        );
         let devices = self.store.devices()?;
         for id in remove {
             anyhow::ensure!(*id != self.device, "this computer can't remove itself");
@@ -1006,12 +1032,14 @@ impl SyncEngine {
             if let Some(mut info) = devices.iter().find(|d| &d.id == id).cloned() {
                 info.removed = true;
                 info.last_seen = now();
-                let _ = self.store.put_device(&info, now());
+                let _ = self.store.put_device(&info, now(), self.epoch());
             }
         }
+        // Only entries said under this epoch (or kept from before epochs
+        // were recorded): see [`SyncStore::devices_of`].
         let recipients: Vec<PublicKey> = self
             .store
-            .devices()?
+            .devices_of(&[self.epoch()])?
             .iter()
             .filter(|d| !d.removed && !remove.contains(&d.id))
             .filter_map(|d| {
@@ -1056,6 +1084,7 @@ impl SyncEngine {
         let outcome = rotation::adopt(ev, &self.identity.secret, &self.identity.device);
         match outcome {
             Ok(r) => {
+                self.rotation_heard.store(true, Ordering::SeqCst);
                 let mut slot = self
                     .pending_rotation
                     .lock()

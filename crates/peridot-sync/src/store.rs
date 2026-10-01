@@ -140,6 +140,9 @@ impl SyncStore {
                 path TEXT PRIMARY KEY,
                 remote TEXT NOT NULL
             );",
+                // The epoch each device entry was said under; NULL for
+                // entries recorded before this was kept.
+                "ALTER TABLE devices ADD COLUMN epoch INTEGER;",
             ],
         )?;
         Ok(Self { db })
@@ -268,17 +271,43 @@ impl SyncStore {
         Ok(removed)
     }
 
-    pub fn put_device(&self, info: &DeviceInfo, created_at: u64) -> opal_core::Result<()> {
+    /// Record a device entry said under `epoch`. A newer epoch's entry
+    /// always replaces an older one's; within an epoch, the newest wins.
+    pub fn put_device(
+        &self,
+        info: &DeviceInfo,
+        created_at: u64,
+        epoch: u64,
+    ) -> opal_core::Result<()> {
         let json = serde_json::to_string(info).expect("serializable");
         self.db.with(|c| {
             c.execute(
-                "INSERT INTO devices (id, info, created_at) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(id) DO UPDATE SET info = excluded.info, created_at = excluded.created_at
-                 WHERE excluded.created_at >= devices.created_at",
-                params![info.id, json, created_at as i64],
+                "INSERT INTO devices (id, info, created_at, epoch) VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET info = excluded.info,
+                    created_at = excluded.created_at, epoch = excluded.epoch
+                 WHERE excluded.epoch > IFNULL(devices.epoch, -1)
+                    OR (excluded.epoch = devices.epoch AND excluded.created_at >= devices.created_at)",
+                params![info.id, json, created_at as i64, epoch as i64],
             )?;
             Ok(())
         })
+    }
+
+    /// The device entries said under one of `epochs`, plus those recorded
+    /// before epochs were kept. Only these count as your devices when a
+    /// secret is handed out or the directory is said again: an entry
+    /// taken in under an older epoch could come from a computer that was
+    /// removed and still holds that epoch's secret.
+    pub fn devices_of(&self, epochs: &[u64]) -> opal_core::Result<Vec<DeviceInfo>> {
+        let rows: Vec<(String, Option<i64>)> = self.db.with(|c| {
+            let mut st = c.prepare("SELECT info, epoch FROM devices")?;
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        })?;
+        Ok(rows
+            .into_iter()
+            .filter(|(_, e)| e.is_none_or(|e| epochs.contains(&(e as u64))))
+            .filter_map(|(j, _)| serde_json::from_str(&j).ok())
+            .collect())
     }
 
     pub fn devices(&self) -> opal_core::Result<Vec<DeviceInfo>> {
