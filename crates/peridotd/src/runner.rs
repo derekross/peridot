@@ -269,7 +269,7 @@ async fn rotated(app: &Arc<App>, engine: &Arc<SyncEngine>) -> bool {
             });
             true
         }
-        Some(Rotation::Removed { epoch }) => {
+        Some(Rotation::Removed { epoch, .. }) => {
             tracing::warn!("this computer was left out of epoch {epoch}");
             app.handover("stopping after removal", |app| async move {
                 app.removed_elsewhere().await;

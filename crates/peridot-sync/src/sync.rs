@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use nostr_sdk::prelude::*;
 use opal_kit::relays::Outbox;
 use opal_kit::signer::sign_within;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::DATA_KIND;
@@ -40,6 +40,17 @@ pub const REFRESH_AFTER: u64 = 30 * 86_400;
 pub const CHUNK_GRACE: u64 = 7 * 86_400;
 /// At most this many chunks in one deletion request.
 const DELETE_BATCH: usize = 100;
+
+/// Where [`SyncEngine::rotate`] records the directory a rotation was
+/// computed from, until the new epoch's republish says it again.
+const ROTATION_DIRECTORY: &str = "peridot.rotation_directory";
+
+#[derive(Serialize, Deserialize)]
+struct RotationDirectory {
+    /// `commitment()` of the secret the rotation minted.
+    commitment: String,
+    devices: Vec<DeviceInfo>,
+}
 /// Events dated further ahead than this are refused: a far-future date
 /// would sit on top of every later change (and push the catch-up point
 /// past them).
@@ -76,6 +87,9 @@ pub struct SyncEngine {
     /// is replaced when this computer switches, so no rotation is started
     /// from an epoch that has already moved on.
     rotation_heard: AtomicBool,
+    /// Set by [`Self::rotate`] once it announces: this computer's own
+    /// announcement, heard back from the relays, is then not a removal.
+    rotating: AtomicBool,
     device: String,
     device_name: String,
     version: String,
@@ -204,6 +218,7 @@ impl SyncEngine {
             previous,
             pending_rotation: std::sync::Mutex::new(None),
             rotation_heard: AtomicBool::new(false),
+            rotating: AtomicBool::new(false),
             device,
             device_name: p.device_name,
             version: p.version,
@@ -237,9 +252,8 @@ impl SyncEngine {
     }
 
     /// Everything that should be on every server right now, with the
-    /// newest `created_at` we know for it. Device entries only from
-    /// `device_epochs` (see [`SyncStore::devices_of`]).
-    fn expected_items(&self, device_epochs: &[u64]) -> anyhow::Result<Vec<(Sealed, Item, u64)>> {
+    /// newest `created_at` we know for it, and `devices` as the directory.
+    fn expected_items(&self, devices: Vec<DeviceInfo>) -> anyhow::Result<Vec<(Sealed, Item, u64)>> {
         let mut out = Vec::new();
         let mut chunks: BTreeMap<String, u64> = BTreeMap::new();
         for path in self.store.remote_paths()? {
@@ -269,7 +283,7 @@ impl SyncEngine {
                 out.push((envelope::seal(&self.keys, &item)?, item, at));
             }
         }
-        for d in self.store.devices_of(device_epochs)? {
+        for d in devices {
             // Ours goes out daily anyway; the others' only need to exist.
             let item = Item::Device(d);
             out.push((envelope::seal(&self.keys, &item)?, item, u64::MAX));
@@ -286,7 +300,7 @@ impl SyncEngine {
     /// may want to be asked about.
     pub async fn audit(&self, now: u64) -> anyhow::Result<AuditReport> {
         let relays = self.relays.read().await.clone();
-        let expected = self.expected_items(&[self.epoch()])?;
+        let expected = self.expected_items(self.store.devices_of(&[self.epoch()])?)?;
         let root_d = Identity::root_name(&self.pubkey());
         let mut report = AuditReport {
             at: now,
@@ -986,12 +1000,18 @@ impl SyncEngine {
     }
 
     /// Everything this computer knows, said again under the current keys.
-    /// After a rotation, so the new epoch has it all: the rotator's device
-    /// entries were all taken in under the epoch it rotated from, before
-    /// any removed computer could write anything that counts.
+    /// After a rotation, so the new epoch has it all. The directory said
+    /// again is the one this computer's own rotation to this epoch was
+    /// computed from (see [`Self::rotate`]), never whatever it holds from
+    /// the previous epoch: a computer that took in a removed computer's
+    /// entries before switching, and republishes for any reason, can't
+    /// carry them over. Without such a record, only this epoch's entries.
     pub async fn republish_everything(&self) -> anyhow::Result<usize> {
-        let epoch = self.epoch();
-        let items = self.expected_items(&[epoch, epoch.saturating_sub(1)])?;
+        let devices = match self.rotation_directory() {
+            Some(d) => d,
+            None => self.store.devices_of(&[self.epoch()])?,
+        };
+        let items = self.expected_items(devices)?;
         let n = items.len();
         for (sealed, _, at) in items {
             let after = if at == u64::MAX { 0 } else { at };
@@ -1056,9 +1076,28 @@ impl SyncEngine {
             &self.identity.device,
             &recipients,
         )?;
+        // The directory the new epoch starts with is exactly the one these
+        // recipients came from, removal flags included; it is bound to the
+        // new secret, so only the engine that starts on it says it again.
+        let directory = RotationDirectory {
+            commitment: next.commitment(),
+            devices: self.store.devices_of(&[self.epoch()])?,
+        };
+        self.store
+            .db()
+            .set_kv(ROTATION_DIRECTORY, &serde_json::to_string(&directory)?)?;
+        self.rotating.store(true, Ordering::SeqCst);
         self.outbox.push(&ev)?;
         self.flush().await;
         Ok(next)
+    }
+
+    /// The directory recorded by this computer's own rotation to the epoch
+    /// it is on now, if it made one.
+    fn rotation_directory(&self) -> Option<Vec<DeviceInfo>> {
+        let json = self.store.db().get_kv(ROTATION_DIRECTORY).ok()??;
+        let d: RotationDirectory = serde_json::from_str(&json).ok()?;
+        (d.commitment == self.identity.secret.commitment()).then_some(d.devices)
     }
 
     /// Chunks current entries refer to that never arrived.
@@ -1082,6 +1121,17 @@ impl SyncEngine {
     /// A rotation event under our rekey address: open it, find our wrap.
     fn take_rotation(&self, ev: &Event) -> bool {
         let outcome = rotation::adopt(ev, &self.identity.secret, &self.identity.device);
+        // Our own announcement while we switch to it ourselves: it has no
+        // wrap for us, and must not read as "this computer was removed".
+        // (Heard after a crash that lost the new secret, it does: the
+        // others moved on with a secret this computer no longer has.)
+        if let Ok(Rotation::Removed { rotator, .. }) = &outcome
+            && *rotator == self.identity.device.public_key()
+            && self.rotating.load(Ordering::SeqCst)
+        {
+            self.rotation_heard.store(true, Ordering::SeqCst);
+            return true;
+        }
         match outcome {
             Ok(r) => {
                 self.rotation_heard.store(true, Ordering::SeqCst);

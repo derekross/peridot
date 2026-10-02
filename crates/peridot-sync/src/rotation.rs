@@ -50,8 +50,9 @@ pub enum Rotation {
         secret: SyncSecret,
         rotator: PublicKey,
     },
-    /// Every other device got a wrap; we didn't.
-    Removed { epoch: u64 },
+    /// Every other device got a wrap; we didn't. Also what the rotator
+    /// reads in its own announcement, which has no wrap for itself.
+    Removed { epoch: u64, rotator: PublicKey },
 }
 
 fn locator(rotator: &PublicKey, recipient: &PublicKey, epoch: u64) -> String {
@@ -126,7 +127,10 @@ pub fn adopt(ev: &Event, current: &SyncSecret, device: &Keys) -> anyhow::Result<
     let rotator = PublicKey::from_hex(&a.rotator)?;
     let mine = locator(&rotator, &device.public_key(), a.epoch);
     let Some(wrap) = a.wraps.iter().find(|w| w.loc == mine) else {
-        return Ok(Rotation::Removed { epoch: a.epoch });
+        return Ok(Rotation::Removed {
+            epoch: a.epoch,
+            rotator,
+        });
     };
     let text = Zeroizing::new(nip44::decrypt(device.secret_key(), &rotator, &wrap.w)?);
     let secret = SyncSecret::from_hex(&text)?;
@@ -157,7 +161,7 @@ mod tests {
         }
         assert!(matches!(
             adopt(&ev, &current, &stolen).unwrap(),
-            Rotation::Removed { epoch: 2 }
+            Rotation::Removed { epoch: 2, .. }
         ));
         // Without the current secret the envelope doesn't even open.
         assert!(adopt(&ev, &SyncSecret::generate(), &laptop).is_err());

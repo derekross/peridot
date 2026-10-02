@@ -424,11 +424,27 @@ impl App {
         let engine = self.engine().await?;
         // Whichever engine ends up starting the new epoch (see below) must
         // say everything again under the new keys and publish the root; the
-        // flags go in first. Should the announcement fail, the next start
-        // publishes once more than needed, which is harmless.
+        // flags go in first. A rotation that fails puts them back as they
+        // were: a flag left behind would have this computer say everything
+        // again after adopting someone else's epoch.
+        let before = [
+            self.db.get_kv("peridot.republish_pending")?,
+            self.db.get_kv("peridot.root_pending")?,
+        ];
         self.db.set_kv("peridot.republish_pending", "1")?;
         self.db.set_kv("peridot.root_pending", "1")?;
-        let next = engine.rotate(remove).await?;
+        let next = match engine.rotate(remove).await {
+            Ok(next) => next,
+            Err(e) => {
+                for (key, was) in ["peridot.republish_pending", "peridot.root_pending"]
+                    .into_iter()
+                    .zip(before)
+                {
+                    let _ = self.db.set_kv(key, was.as_deref().unwrap_or("0"));
+                }
+                return Err(e);
+            }
+        };
         let epoch = next.epoch();
         // This computer hears its own announcement back from the relays
         // and would adopt it too; under the switch lock, whichever of the
@@ -492,7 +508,9 @@ impl App {
             &(Timestamp::now().as_secs() + WINDOW).to_string(),
         )?;
         // The rotator republishes everything and the root; a computer
-        // that adopts publishes its own entry again, which the runner does.
+        // that adopts publishes its own entry again, which the runner does,
+        // and never says everything again (NIP.md 6.3).
+        self.db.set_kv("peridot.republish_pending", "0")?;
         self.start_engine_locked(identity, false).await?;
         tracing::info!("moved to epoch {}", self.engine().await?.epoch());
         Ok(())

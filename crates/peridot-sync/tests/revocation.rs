@@ -277,3 +277,50 @@ async fn what_a_computer_heard_before_switching_doesnt_count_after() {
     let ev = rotation_from(&url, &s2).await;
     assert!(!receives(&ev, &s2, &laptop.identity.device));
 }
+
+#[tokio::test]
+async fn saying_everything_again_never_carries_what_was_heard_before_switching() {
+    let relay = mock_relay().await;
+    let url = relay.url().await;
+    let (desk, mut spare, laptop) = three(&url).await;
+    let s1 = desk.identity.secret.clone();
+    let s2 = desk.engine.rotate(&[laptop.id()]).await.unwrap();
+
+    // The spare, lagging, takes the laptop's epoch-1 entries in, then
+    // switches, and says everything again: as it would with a republish
+    // flag left behind by a rotation of its own that was refused.
+    spare.engine.ingest(&written_under(&s1, &ghost(&laptop)));
+    spare
+        .engine
+        .ingest(&written_under(&s1, &unremoved(&laptop)));
+    spare.adopt(s2.clone(), &url).await;
+    spare.engine.republish_everything().await.unwrap();
+    assert!(!on_relay(&url, &s2, "dev:ghost").await);
+    assert!(!on_relay(&url, &s2, &format!("dev:{}", laptop.id())).await);
+}
+
+#[tokio::test]
+async fn the_rotator_says_its_directory_again_and_isnt_removed_by_its_own_announcement() {
+    let relay = mock_relay().await;
+    let url = relay.url().await;
+    let (mut desk, spare, laptop) = three(&url).await;
+    let s2 = desk.engine.rotate(&[laptop.id()]).await.unwrap();
+
+    // Its own announcement comes back from the relay: no wrap for itself,
+    // and still not a removal.
+    desk.sync().await;
+    assert!(desk.engine.take_pending_rotation().is_none());
+
+    // After switching, the directory it rotated from is said again under
+    // the new keys, the laptop's entry marked removed.
+    desk.adopt(s2.clone(), &url).await;
+    desk.engine.republish_everything().await.unwrap();
+    for id in [desk.id(), spare.id(), laptop.id()] {
+        assert!(on_relay(&url, &s2, &format!("dev:{id}")).await, "{id}");
+    }
+    let devices = desk.devices().await;
+    assert!(
+        devices.iter().any(|d| d.id == laptop.id() && d.removed),
+        "{devices:?}"
+    );
+}
