@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "derekross.peridot",
   "name": "Peridot",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "author": "Derek Ross",
   "license": "MIT",
   "description": "Keep your Omarchy computers matching: your look, keyboard shortcuts, terminal, bar and menu follow you. End-to-end encrypted, no account needed; pair a new computer with a code. Needs the peridotd service: run dist/install.sh.",
