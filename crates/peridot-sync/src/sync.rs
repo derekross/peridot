@@ -1046,22 +1046,36 @@ impl SyncEngine {
             anyhow::ensure!(*id != self.device, "this computer can't remove itself");
             anyhow::ensure!(devices.iter().any(|d| &d.id == id), "no such computer");
         }
-        // Mark the removed ones, under the current keys; the directory is
-        // republished under the new epoch with the flags.
+        // The membership this rotation is about, read once: entries said
+        // under this epoch (or kept from before epochs were recorded, see
+        // [`SyncStore::devices_of`]), with the removal applied to this copy.
+        // The recipients and the directory the new epoch starts with both
+        // come from it and nothing else: the store keeps taking in entries
+        // while this runs, including from the computer being removed (a new
+        // ID with its own key, or its own entry dated later and not marked
+        // removed), and none of that may reach either.
+        let at = now();
+        let mut directory = self.store.devices_of(&[self.epoch()])?;
         for id in remove {
-            if let Some(mut info) = devices.iter().find(|d| &d.id == id).cloned() {
-                info.removed = true;
-                info.last_seen = now();
-                let _ = self.store.put_device(&info, now(), self.epoch());
+            if !directory.iter().any(|d| &d.id == id)
+                && let Some(d) = devices.iter().find(|d| &d.id == id)
+            {
+                // Known only from an older epoch: still listed, as removed.
+                directory.push(d.clone());
             }
         }
-        // Only entries said under this epoch (or kept from before epochs
-        // were recorded): see [`SyncStore::devices_of`].
-        let recipients: Vec<PublicKey> = self
-            .store
-            .devices_of(&[self.epoch()])?
+        for d in directory.iter_mut().filter(|d| remove.contains(&d.id)) {
+            d.removed = true;
+            d.last_seen = at;
+        }
+        // The flags here too, for this computer's own view until it
+        // switches.
+        for d in directory.iter().filter(|d| remove.contains(&d.id)) {
+            let _ = self.store.put_device(d, at, self.epoch());
+        }
+        let recipients: Vec<PublicKey> = directory
             .iter()
-            .filter(|d| !d.removed && !remove.contains(&d.id))
+            .filter(|d| !d.removed)
             .filter_map(|d| {
                 d.pubkey
                     .as_deref()
@@ -1076,12 +1090,11 @@ impl SyncEngine {
             &self.identity.device,
             &recipients,
         )?;
-        // The directory the new epoch starts with is exactly the one these
-        // recipients came from, removal flags included; it is bound to the
-        // new secret, so only the engine that starts on it says it again.
+        // Bound to the new secret, so only the engine that starts on it
+        // says it again.
         let directory = RotationDirectory {
             commitment: next.commitment(),
-            devices: self.store.devices_of(&[self.epoch()])?,
+            devices: directory,
         };
         self.store
             .db()

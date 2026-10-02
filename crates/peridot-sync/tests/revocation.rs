@@ -324,3 +324,43 @@ async fn the_rotator_says_its_directory_again_and_isnt_removed_by_its_own_announ
         "{devices:?}"
     );
 }
+
+#[tokio::test]
+async fn the_new_epoch_starts_with_the_removal_whatever_the_store_holds() {
+    let relay = mock_relay().await;
+    let url = relay.url().await;
+    let (mut desk, spare, laptop) = three(&url).await;
+    let s1 = desk.identity.secret.clone();
+
+    // Still a member, the laptop dates its own entry ahead (within the
+    // allowed clock skew): newer than the removal flag the desk is about
+    // to write, so the store keeps it over the flag.
+    let mut ahead = match unremoved(&laptop) {
+        Item::Device(d) => d,
+        _ => unreachable!(),
+    };
+    ahead.last_seen = Timestamp::now().as_secs() + 300;
+    let keys = s1.keys();
+    let s = envelope::seal(&keys, &Item::Device(ahead)).unwrap();
+    let ev = EventBuilder::new(Kind::Custom(DATA_KIND), s.content)
+        .tag(Tag::identifier(s.d))
+        .custom_created_at(Timestamp::from(Timestamp::now().as_secs() + 300))
+        .finalize(keys.signer().unwrap())
+        .unwrap();
+    desk.engine.ingest(&ev);
+
+    // The removal still holds in what the new epoch starts with, and in
+    // who gets the epoch after it.
+    let s2 = desk.engine.rotate(&[laptop.id()]).await.unwrap();
+    desk.adopt(s2.clone(), &url).await;
+    desk.engine.republish_everything().await.unwrap();
+    let devices = desk.devices().await;
+    assert!(
+        devices.iter().any(|d| d.id == laptop.id() && d.removed),
+        "{devices:?}"
+    );
+    desk.engine.rotate(&[]).await.unwrap();
+    let ev = rotation_from(&url, &s2).await;
+    assert!(receives(&ev, &s2, &spare.identity.device));
+    assert!(!receives(&ev, &s2, &laptop.identity.device));
+}
