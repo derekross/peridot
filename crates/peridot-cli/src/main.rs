@@ -588,10 +588,7 @@ async fn run() -> Result<()> {
                 return Err(e);
             }
             let all: Vec<String> = links.iter().map(|(_, u)| u.clone()).collect();
-            let _ = std::process::Command::new("wl-copy")
-                .arg("--")
-                .arg(all.join("\n"))
-                .status();
+            copy_to_clipboard(&all.join("\n"));
             if notify {
                 let body = if links.len() == 1 {
                     format!("{} · link copied to the clipboard", links[0].0)
@@ -944,11 +941,7 @@ async fn run() -> Result<()> {
             if !already {
                 let m = c.call("identity.move.start", json!(null)).await?;
                 let code = m["code"].as_str().unwrap_or("").to_string();
-                let copied = std::process::Command::new("wl-copy")
-                    .arg("--")
-                    .arg(&code)
-                    .status()
-                    .is_ok_and(|st| st.success());
+                let copied = copy_to_clipboard(&code);
                 println!(
                     "Your key, as a one-time code for Opal, {}:",
                     if copied {
@@ -1324,6 +1317,27 @@ async fn run() -> Result<()> {
     Ok(())
 }
 
+/// Put `text` on the clipboard. Over stdin, never as an argument: wl-copy
+/// keeps running to serve the clipboard, and while it does its arguments
+/// are readable by every process (a share link carries its file's key, the
+/// Opal move code is your sealed key). True once wl-copy took it.
+fn copy_to_clipboard(text: &str) -> bool {
+    let Ok(mut child) = std::process::Command::new("wl-copy")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    // Dropped after writing, so wl-copy sees the end of its input.
+    let written = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
+    child.wait().is_ok_and(|st| st.success()) && written
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1493,3 +1507,31 @@ fn print_status(s: &Value) {
 const APPROVAL_HINT: &str = "Peridot's panel will ask you to allow this (open it from the bar); it waits up to two minutes.";
 const OPAL_WILL_ASK: &str =
     "Opal will ask you to approve Peridot: look for its prompt in your bar.";
+
+#[cfg(test)]
+mod tests {
+    use super::copy_to_clipboard;
+
+    /// Needs a Wayland session and wl-clipboard, and replaces what is on
+    /// the clipboard: `cargo test -p peridot-cli -- --ignored`.
+    #[test]
+    #[ignore]
+    fn the_clipboard_gets_the_text_and_no_command_line_shows_it() {
+        let text = format!("https://myperidot.app/s/#k-{}", std::process::id());
+        assert!(copy_to_clipboard(&text));
+        let pasted = std::process::Command::new("wl-paste")
+            .arg("--no-newline")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&pasted.stdout), text);
+        for entry in std::fs::read_dir("/proc").unwrap().flatten() {
+            if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
+                assert!(
+                    !String::from_utf8_lossy(&cmdline).contains(&text),
+                    "{:?}",
+                    entry.path()
+                );
+            }
+        }
+    }
+}
