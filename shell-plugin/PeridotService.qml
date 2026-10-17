@@ -200,7 +200,10 @@ Item {
   }
 
   // `omarchy-shell derekross.peridot <fn>`; notifications open the panel.
+  // Off for the copy a widget runs itself on a custom bar.
+  property bool ipcEnabled: true
   IpcHandler {
+    enabled: root.ipcEnabled
     target: "derekross.peridot"
     function open(): string { root.openRequested(); return "ok" }
     function sync(): string { root.call("sync.now", null); return "ok" }
